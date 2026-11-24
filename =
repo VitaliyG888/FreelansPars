@@ -1,7 +1,0 @@
---- stderr ---
-bash: line 9: warning: here-document at line 1 delimited by end-of-file (wanted `PY')
-  File "<stdin>", line 8
-    for j in c.execute(select
-                      ^
-SyntaxError: '(' was never closed
---- exit 1 ---
