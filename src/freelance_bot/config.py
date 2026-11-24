@@ -298,6 +298,9 @@ class Secrets(BaseSettings):
 
     telegram_bot_token: str = ""
     telegram_admin_chat_ids: str = ""
+    # Короткий алиас ADMIN_ID из .env: тот же смысл, что и TELEGRAM_ADMIN_CHAT_IDS,
+    # но удобен, когда администратор один. Значение склеивается со списком.
+    admin_id: str = ""
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
@@ -329,15 +332,21 @@ class Secrets(BaseSettings):
 
     @property
     def telegram_admins(self) -> list[int]:
-        """Разбирает admin chat id через запятую."""
-        if not self.telegram_admin_chat_ids:
-            return []
+        """Разбирает admin chat id через запятую.
+
+        Источники объединяются: ``TELEGRAM_ADMIN_CHAT_IDS`` (список) и
+        ``ADMIN_ID`` (одиночный ID). Дубликаты и нечисловые значения
+        отбрасываются, порядок сохраняется.
+        """
+        raw = ",".join(filter(None, (self.telegram_admin_chat_ids, self.admin_id)))
         admins: list[int] = []
-        for chat_id in self.telegram_admin_chat_ids.split(","):
+        for chat_id in raw.split(","):
             value = chat_id.strip()
             # id групп отрицательный, поэтому проверяем цифры после знака минус.
             if value.lstrip("-").isdigit():
-                admins.append(int(value))
+                admin = int(value)
+                if admin not in admins:
+                    admins.append(admin)
         return admins
 
 

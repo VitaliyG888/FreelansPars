@@ -28,6 +28,22 @@ log = logging.getLogger(__name__)
 
 MAX_PREVIEW = 1200
 
+# Разделы, открытые любому допущенному пользователю: там только его личные
+# данные и заказы. Всё, что меняет поведение бота для всех (конвейер, письма,
+# профиль исполнителя, платформы), требует роли администратора.
+SELF_SERVICE_TOPICS: frozenset[str] = frozenset(
+    {
+        "settings",
+        "hub",
+        "cat_filters",
+        "platform_filters",
+        "monitoring",
+        "filters",
+        "categories_user",
+        "platforms_user",
+    }
+)
+
 
 def _md(value: object) -> str:
     """Экранирование динамического текста для legacy-Markdown Telegram."""
@@ -136,6 +152,12 @@ class SettingsCommandsMixin:
     async def _ensure_super_admin(self, update: Update) -> bool:  # pragma: no cover - abstract
         raise NotImplementedError
 
+    def _is_super_admin_update(self, update: Update) -> bool:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    async def _deny_insufficient_rights(self, update: Update) -> None:  # pragma: no cover
+        raise NotImplementedError
+
     async def _apply_user_filters_input(
         self, path: str, text: str, update: Update
     ) -> bool:  # pragma: no cover - abstract
@@ -164,7 +186,7 @@ class SettingsCommandsMixin:
 
     # ------------------------------------------------------------------ /set, /get
     async def _cmd_set(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
         args = context.args or []
         if len(args) < 2:
@@ -189,7 +211,7 @@ class SettingsCommandsMixin:
         )
 
     async def _cmd_get(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
         args = context.args or []
         if not args:
@@ -250,12 +272,37 @@ class SettingsCommandsMixin:
         return True, f"✅ `{_md(path)}` = `{_md(rendered[:200])}`"
 
     # ------------------------------------------------------------------ /settings
+    # Разделы настроек в порядке показа. «Настройки» — хаб разделов, остальные
+    # многоточечные записи открывают первый экран соответствующего раздела.
+    # Записи с admin_only=True не показываются обычным подписчикам вовсе (они
+    # не «серые» — их нет в клавиатуре), а их хендлеры дополнительно закрыты
+    # проверкой _ensure_super_admin.
+    SETTINGS_SECTIONS: tuple[tuple[str, str, str, bool], ...] = (
+        ("main", "⚙️ Основные", "settings:main", True),
+        ("admin", "🛠 Администрирование", "settings:admin", True),
+        ("letters", "✉️ Письма", "settings:letters", True),
+        ("profile", "👤 Профиль", "settings:profile", True),
+        ("settings", "🔧 Настройки", "settings:hub", False),
+        ("cat_filters", "📂 Фильтры категорий", "uf_menu", False),
+        ("platform_filters", "🌐 Фильтры бирж", "uf_platforms", False),
+        ("monitoring", "📡 Мониторинг заказов", "settings:monitoring", False),
+    )
+
     async def _cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Открывает меню настроек: подписчику — только его разделы.
+
+        Доступ к общим настройкам (конвейер, письма, профиль, платформы)
+        проверяется _ensure_super_admin, поэтому обычный допущенный
+        пользователь видит лишь «Настройки», «Фильтры категорий»,
+        «Фильтры бирж» и «Мониторинг заказов».
+        """
         if not await self._ensure_admin(update) or not update.message:
             return
 
         topic = context.args[0].lower() if context.args else ""
         if topic in {"all", "dump", "full", "yaml"}:
+            if not await self._ensure_super_admin(update):
+                return
             payload = {
                 "config": self.config.model_dump(mode="json"),
                 "profile": self._profile_model().model_dump(mode="json"),
@@ -265,6 +312,10 @@ class SettingsCommandsMixin:
             return
 
         if topic:
+            # Явно запрошенный раздел: админские темы закрыты проверкой прав.
+            if not self._topic_allowed(topic, update):
+                await self._deny_insufficient_rights(update)
+                return
             text = self._settings_section(topic)
             if text is None:
                 text = (
@@ -275,7 +326,39 @@ class SettingsCommandsMixin:
             await self._reply(update, text, parse_mode="Markdown")
             return
 
-        await self._reply(update, self._settings_overview(), parse_mode="Markdown")
+        text, markup = self._settings_hub(update)
+        await self._reply(update, text, parse_mode="Markdown", reply_markup=markup)
+
+    def _topic_allowed(self, topic: str, update: Update) -> bool:
+        """True, если раздел можно открыть этому пользователю.
+
+        Админскими считаются темы конвейера и настроек бота: они меняют
+        поведение для всех. Личные разделы доступны любому допущенному.
+        """
+        if topic in SELF_SERVICE_TOPICS:
+            return True
+        return self._is_super_admin_update(update)
+
+    def _settings_hub(self, update: Update) -> tuple[str, InlineKeyboardMarkup]:
+        """Строит текст и клавиатуру меню настроек по роли пользователя."""
+        is_admin = self._is_super_admin_update(update)
+        rows: list[list[InlineKeyboardButton]] = []
+        for _key, label, callback, admin_only in self.SETTINGS_SECTIONS:
+            if admin_only and not is_admin:
+                continue
+            rows.append([InlineKeyboardButton(label, callback_data=callback)])
+
+        if is_admin:
+            header = "⚙️ *Настройки*"
+            note = "Полный доступ: все разделы бота."
+        else:
+            header = "⚙️ *Настройки*"
+            note = (
+                "Ваши разделы: заказы и личные фильтры. "
+                "Общие настройки бота доступны администратору."
+            )
+        text = f"{header}\n\n{note}\n\nВыберите раздел:"
+        return text, InlineKeyboardMarkup(rows)
 
     def _settings_overview(self) -> str:
         cfg = self.config
@@ -307,6 +390,62 @@ class SettingsCommandsMixin:
 
     def _settings_section(self, topic: str) -> str | None:
         cfg = self.config
+        # Составные разделы меню настроек: собираются из готовых блоков ниже,
+        # чтобы один и тот же текст не дублировался в двух местах.
+        if topic == "main":
+            return (
+                self._settings_section("runtime") or ""
+            ) + "\n\n" + (self._settings_section("scoring") or "")
+        if topic == "admin":
+            return (
+                "🛠 *Администрирование*\n\n"
+                "*Платформы и категории сбора*\n"
+                "/platforms — включить, выключить, добавить площадку\n"
+                "/categories — общий фильтр сбора\n"
+                "/interval — интервал циклов (900-3600 с)\n"
+                "/score — штраф за красные флаги и свежесть\n"
+                "/pause, /resume — пауза и возобновление сбора\n\n"
+                "*Доступ и заявки*\n"
+                "/users — кто имеет доступ и какие заявки ждут решения\n"
+                "/adduser ID — выдать доступ\n"
+                "/deluser ID — убрать доступ\n"
+                "/set_admin ID — назначить администратора настроек\n"
+                "/unset_admin ID — снять администратора настроек\n\n"
+                "*Служебное*\n"
+                "/set, /get — изменить и посмотреть параметр\n"
+                "/reload — перечитать файлы, /reset — сбросить оверлей\n"
+                "/export — выгрузить настройки в YAML\n"
+                "/logs — последние ошибки конвейера"
+            )
+        if topic == "letters":
+            return (
+                "✉️ *Письма*\n\n"
+                "*Генерация*\n"
+                "/llm — модель, endpoint, ключ, temperature, провайдеры\n"
+                "/prompt — системный промпт и дополнительные инструкции\n"
+                "/style — тон, длина, эмодзи, запрещённые фразы\n\n"
+                "*Отправка*\n"
+                "/send — dry-run, одобрение, лимиты, пауза, письма за цикл\n"
+                "/pricing — стратегия цены\n"
+                "/markup N — коэффициент наценки\n"
+                "/minprice N — минимальная цена письма\n\n"
+                + (self._settings_section("llm") or "")
+            )
+        if topic == "hub":
+            return self._settings_overview()
+        if topic == "monitoring":
+            return (
+                "📡 *Мониторинг заказов*\n\n"
+                "*Заказы по вашим фильтрам*\n"
+                "/jobs [5|10|30] — последние заказы\n"
+                "/favorites — избранные заказы (♥ на карточке)\n\n"
+                "*Статистика*\n"
+                "/status — статус сбора и последний цикл\n"
+                "/stats — статистика за 7 дней\n\n"
+                "*Что настроить, чтобы заказов было больше*\n"
+                "/filters — рубрики, подкатегории, биржи, мин. цена\n"
+                "Фильтры личные: расширение не влияет на других подписчиков."
+            )
         if topic == "runtime":
             return (
                 "⏱️ *Runtime*\n\n"
@@ -485,7 +624,7 @@ class SettingsCommandsMixin:
         return InlineKeyboardMarkup(rows)
 
     async def _cmd_platforms(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
 
         args = context.args
@@ -895,7 +1034,7 @@ class SettingsCommandsMixin:
         return find_category(value)
 
     async def _cmd_categories(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
 
         cat = self.config.category_filter
@@ -1170,7 +1309,7 @@ class SettingsCommandsMixin:
         )
 
     async def _cmd_send(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
 
         args = context.args
@@ -1265,7 +1404,7 @@ class SettingsCommandsMixin:
 
     # ------------------------------------------------------------------ /llm
     async def _cmd_llm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
 
         cfg = self.config.llm
@@ -1695,7 +1834,7 @@ class SettingsCommandsMixin:
 
     # ------------------------------------------------------------------ /prompt
     async def _cmd_prompt(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
 
         args = context.args
@@ -1748,7 +1887,7 @@ class SettingsCommandsMixin:
 
     # ------------------------------------------------------------------ /style
     async def _cmd_style(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
 
         profile = self._profile_model()
@@ -1836,7 +1975,7 @@ class SettingsCommandsMixin:
 
     # ------------------------------------------------------------------ /skills
     async def _cmd_skills(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
 
         profile = self._profile_model()
@@ -1888,7 +2027,7 @@ class SettingsCommandsMixin:
 
     # ------------------------------------------------------------------ /profile
     async def _cmd_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
 
         profile = self._profile_model()
@@ -1956,7 +2095,7 @@ class SettingsCommandsMixin:
 
     # ------------------------------------------------------------------ /reload, /reset, /export
     async def _cmd_reload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
         from .config import load_config
         from .profile import load_profile
@@ -1976,7 +2115,7 @@ class SettingsCommandsMixin:
         )
 
     async def _cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
         if self.settings is None:
             await update.message.reply_text("ℹ️ Хранилище оверлея не подключено.")
@@ -2005,7 +2144,7 @@ class SettingsCommandsMixin:
         await update.message.reply_text(f"✅ Сброшено: {what}. Значения взяты из файлов.")
 
     async def _cmd_export(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._ensure_admin(update) or not update.message:
+        if not await self._ensure_super_admin(update) or not update.message:
             return
         payload = {
             "config": self.config.model_dump(mode="json"),
@@ -2034,13 +2173,18 @@ class SettingsCommandsMixin:
             return
         path = self._awaiting_input
         text = update.message.text
-        self._awaiting_input = None
         # Пути user_filters.* (мин. цена личного фильтра) пишут в SQLite
         # пользователя, а не в конфиг — обрабатываются отдельным хуком.
-        if path.startswith("user_filters.") and await self._apply_user_filters_input(
-            path, text, update
-        ):
+        if path.startswith("user_filters."):
+            if not await self._apply_user_filters_input(path, text, update):
+                self._awaiting_input = None
             return
+        # Всё остальное пишет в общий конфиг/профиль: это уровень администратора.
+        if not self._is_super_admin_update(update):
+            self._awaiting_input = None
+            await self._deny_insufficient_rights(update)
+            return
+        self._awaiting_input = None
         ok, message = self._apply_value(path, text)
         if not ok:
             await update.message.reply_text(message, parse_mode="Markdown")

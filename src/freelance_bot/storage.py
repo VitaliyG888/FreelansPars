@@ -116,7 +116,8 @@ CREATE TABLE IF NOT EXISTS cycles (
 CREATE TABLE IF NOT EXISTS bot_admins (
     chat_id INTEGER PRIMARY KEY,
     added_by INTEGER,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    is_super INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS bot_subscribers (
@@ -189,6 +190,17 @@ class JobStore:
                     self._conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {decl}")
 
             self._backfill_order_urls()
+            # --- миграция под роли админов: супер-админ назначается /set_admin ---
+            # Колонка is_super отделяет администратора настроек от обычного
+            # подписчика, добавленного через /adduser или одобрение заявки.
+            admin_columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(bot_admins)").fetchall()
+            }
+            if "is_super" not in admin_columns:
+                self._conn.execute(
+                    "ALTER TABLE bot_admins ADD COLUMN is_super INTEGER NOT NULL DEFAULT 0"
+                )
             # Индекс создаётся после миграции: в старой базе колонки status
             # ещё нет, и CREATE INDEX из SCHEMA упал бы.
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
@@ -265,6 +277,49 @@ class JobStore:
             )
             self._conn.commit()
         return cursor.rowcount > 0
+
+    def list_super_admins(self) -> set[int]:
+        """ID чатов, назначенных администраторами командой /set_admin.
+
+        Это отдельный слой поверх ``bot_admins``: обычный подписчик видит
+        карточки и личные фильтры, а разделы настроек открыты только супер-админам
+        (плюс администраторам из ``TELEGRAM_ADMIN_CHAT_IDS``).
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT chat_id FROM bot_admins WHERE is_super = 1"
+            ).fetchall()
+        return {int(row["chat_id"]) for row in rows}
+
+    def set_super_admin(self, chat_id: int, enabled: bool, added_by: int | None = None) -> bool:
+        """Включает или снимает роль администратора настроек.
+
+        Возвращает True, если состояние изменилось. Назначение сразу создаёт
+        запись в ``bot_admins``: супер-админ обязан иметь доступ к боту, иначе
+        он не сможет получить ни карточек, ни ответов на команды.
+        """
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT is_super FROM bot_admins WHERE chat_id = ?", (chat_id,)
+            ).fetchone()
+            if existing is None:
+                if not enabled:
+                    return False
+                self._conn.execute(
+                    "INSERT INTO bot_admins (chat_id, added_by, created_at, is_super)"
+                    " VALUES (?, ?, ?, 1)",
+                    (chat_id, added_by, _now()),
+                )
+                self._conn.commit()
+                return True
+            if bool(existing["is_super"]) == enabled:
+                return False
+            self._conn.execute(
+                "UPDATE bot_admins SET is_super = ? WHERE chat_id = ?",
+                (1 if enabled else 0, chat_id),
+            )
+            self._conn.commit()
+        return True
 
     # ------------------------------------------------------------------ подписки
     def add_subscriber_request(

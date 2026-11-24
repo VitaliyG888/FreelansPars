@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 from telegram import (
     BotCommand,
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
@@ -63,7 +64,7 @@ from telegram.ext import (
 )
 
 from .config import MAX_POLL_INTERVAL_SECONDS, MIN_POLL_INTERVAL_SECONDS
-from .telegram_settings import SettingsCommandsMixin, _parse_flag
+from .telegram_settings import SELF_SERVICE_TOPICS, SettingsCommandsMixin, _parse_flag
 from .telegram_user_filters import UserFiltersCommandsMixin
 
 if TYPE_CHECKING:
@@ -181,6 +182,20 @@ COMMAND_HELP: tuple[CommandHelp, ...] = (
         "Убрать добавленного пользователя; админы из .env убираются только правкой .env.",
         "Доступ",
         ("/deluser 123456789",),
+    ),
+    CommandHelp(
+        "set_admin",
+        "/set_admin ID",
+        "Назначить администратора настроек: откроет разделы конвейера, писем и профиля.",
+        "Доступ",
+        ("/set_admin 123456789",),
+    ),
+    CommandHelp(
+        "unset_admin",
+        "/unset_admin ID",
+        "Снять роль администратора настроек; доступ к заказам при этом сохраняется.",
+        "Доступ",
+        ("/unset_admin 123456789",),
     ),
     CommandHelp(
         "status",
@@ -486,6 +501,11 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
         self.env_admin_ids = set(admin_chat_ids)
         if store is not None:
             self.admin_chat_ids |= store.list_bot_admins()
+        # Роль «администратор настроек»: .env-админы плюс назначенные /set_admin.
+        # Остальные допущенные видят только заказы и личные фильтры.
+        self.super_admin_ids: set[int] = set(self.env_admin_ids)
+        if store is not None:
+            self.super_admin_ids |= store.list_super_admins()
         self.config = config
         self.profile = profile
         self.store = store
@@ -552,6 +572,8 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
         self.app.add_handler(CommandHandler("users", self._cmd_users))
         self.app.add_handler(CommandHandler("adduser", self._cmd_adduser))
         self.app.add_handler(CommandHandler("deluser", self._cmd_deluser))
+        self.app.add_handler(CommandHandler("set_admin", self._cmd_set_admin))
+        self.app.add_handler(CommandHandler("unset_admin", self._cmd_unset_admin))
 
         # Обработчик callback-запросов от inline-кнопок
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -598,12 +620,12 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
         return chat_id in self.admin_chat_ids
 
     def _is_super_admin(self, chat_id: int | None) -> bool:
-        """Администратор из .env: единственный, кто меняет общие настройки.
+        """Администратор настроек: из .env или назначенный через /set_admin.
 
         Подписчики, добавленные через заявку или /adduser, имеют доступ к
         панели и личным фильтрам, но не к настройкам конвейера.
         """
-        return chat_id is not None and chat_id in self.env_admin_ids
+        return chat_id is not None and chat_id in self.super_admin_ids
 
     def _is_admin_update(self, update: Update) -> bool:
         """True, если отправитель или чат в allow-list админов."""
@@ -627,14 +649,32 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
         return self._super_admin_id(update) is not None
 
     async def _ensure_super_admin(self, update: Update) -> bool:
-        """Возвращает True только для администратора из .env, иначе отвечает."""
+        """Возвращает True только для администратора настроек, иначе отвечает."""
         if self._is_super_admin_update(update):
             return True
-        if update.message:
-            await update.message.reply_text(
-                "🔒 Эта команда доступна только администратору бота."
-            )
+        # Отказ тоже пишем в журнал: владельцу полезно видеть, кто пытался
+        # открыть админский раздел.
+        log.warning(
+            "Недостаточно прав (админский раздел): user_id=%s chat_id=%s",
+            update.effective_user.id if update.effective_user else None,
+            update.effective_chat.id if update.effective_chat else None,
+        )
+        await self._deny_insufficient_rights(update)
         return False
+
+    async def _deny_insufficient_rights(self, update: Update) -> None:
+        """Единый ответ на попытку открыть раздел не своего уровня."""
+        text = (
+            "⛔ Недостаточно прав.\n\n"
+            "Этот раздел доступен только администратору бота. "
+            "Вам открыты заказы и личные фильтры: /jobs, /favorites, /filters."
+        )
+        if update.message:
+            await update.message.reply_text(text)
+            return
+        query = update.callback_query
+        if query is not None:
+            await query.answer("⛔ Недостаточно прав.", show_alert=True)
 
     def audience_chat_ids(self) -> set[int]:
         """Все чаты, которые могут получать заказы (админы и подписчики)."""
@@ -1416,6 +1456,54 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
 
         await self._reply(update, text, parse_mode="Markdown")
 
+    # ------------------------------------------------------------- меню настроек
+    async def _handle_settings_callback(
+        self, update: Update, query: CallbackQuery, data: str
+    ) -> None:
+        """Открывает раздел меню настроек, проверяя уровень доступа.
+
+        Callback приходит из клавиатуры /settings. Админские разделы закрыты
+        ещё и здесь: подписчик мог сохранить callback из старого сообщения
+        или собрать его вручную — одного отсутствия кнопки мало.
+        """
+        section = data.split(":", 1)[1] if ":" in data else ""
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if section in {"cat_filters", "uf_menu", "platform_filters", "uf_platforms"}:
+            # Личные фильтры: свой экран и своя клавиатура, доступны всем.
+            if self.store is None or chat_id is None:
+                await query.answer("🗄️ База недоступна.", show_alert=True)
+                return
+            prefs = self.store.get_user_filters(chat_id)
+            if section in {"platform_filters", "uf_platforms"}:
+                text, markup = self._uf_platforms_view(prefs)
+            else:
+                text, markup = self._uf_view(prefs)
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+            return
+
+        if section not in {"main", "admin", "letters", "profile", "hub", "monitoring"}:
+            await query.answer("Неизвестный раздел.", show_alert=True)
+            return
+        if section not in SELF_SERVICE_TOPICS and not self._is_super_admin_update(update):
+            await self._deny_insufficient_rights(update)
+            return
+
+        if section == "hub":
+            # Возврат в меню: клавиатура строится заново по текущей роли.
+            text, markup = self._settings_hub(update)
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+            return
+
+        body = self._settings_section(section)
+        if body is None:
+            await query.answer("Раздел пуст.", show_alert=True)
+            return
+        # Кнопка «⬅ Назад» возвращает к меню с учётом роли.
+        back = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅ Назад", callback_data="settings:hub")]]
+        )
+        await query.edit_message_text(body, parse_mode="Markdown", reply_markup=back)
+
     # ------------------------------------------------------------------ доступ
     async def _cmd_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обрабатывает команду /users: доступ и заявки на подписку."""
@@ -1425,7 +1513,14 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
         lines = ["👥 <b>Доступ к боту</b>", ""]
         for chat_id in sorted(self.admin_chat_ids):
             source = "база (/adduser)" if chat_id in db_admins else ".env (постоянный)"
-            lines.append(f"• <code>{chat_id}</code> — {html_escape(source)}")
+            role = (
+                "🛠 администратор настроек"
+                if chat_id in self.super_admin_ids
+                else "👤 подписчик"
+            )
+            lines.append(
+                f"• <code>{chat_id}</code> — {html_escape(source)}, {html_escape(role)}"
+            )
         if not lines[2:]:
             lines.append("(список пуст)")
 
@@ -1532,6 +1627,88 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
         await self._reply(
             update, f"✅ Пользователь <code>{chat_id}</code> убран из доступа.", parse_mode="HTML"
         )
+
+    async def _cmd_set_admin(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Назначает администратора настроек (/set_admin ID).
+
+        Роль даёт доступ к разделам, которые меняют поведение бота для всех:
+        конвейер, письма, профиль, платформы. Назначать может только
+        действующий администратор настроек.
+        """
+        await self._change_super_admin(update, context, enabled=True)
+
+    async def _cmd_unset_admin(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Снимает роль администратора настроек (/unset_admin ID)."""
+        await self._change_super_admin(update, context, enabled=False)
+
+    async def _change_super_admin(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, *, enabled: bool
+    ) -> None:
+        """Общая реализация /set_admin и /unset_admin."""
+        if not await self._ensure_super_admin(update):
+            return
+        command = "/set_admin" if enabled else "/unset_admin"
+        raw = (context.args or [""])[0]
+        if not raw.lstrip("-").isdigit():
+            await self._reply(
+                update,
+                f"Использование: <code>{command} ID</code> — Telegram ID пользователя "
+                "или группы (для групп ID отрицательный).",
+                parse_mode="HTML",
+            )
+            return
+        chat_id = int(raw)
+        if self.store is None:
+            await self._reply(
+                update, "База недоступна: роль администратора негде сохранить."
+            )
+            return
+        if chat_id in self.env_admin_ids:
+            await self._reply(
+                update,
+                f"<code>{chat_id}</code> задан в .env — он администратор постоянно. "
+                "Роль снимается только правкой .env на сервере.",
+                parse_mode="HTML",
+            )
+            return
+        if not enabled and chat_id == self._super_admin_id(update):
+            # Защита от самоблокировки: без роли не останется, кому управлять.
+            await self._reply(
+                update,
+                "⛔ Нельзя снять роль с самого себя. Попросите другого "
+                "администратора или используйте ID из .env.",
+                parse_mode="HTML",
+            )
+            return
+
+        actor = self._super_admin_id(update)
+        changed = self.store.set_super_admin(chat_id, enabled, added_by=actor)
+        if enabled:
+            # Назначенный сразу получает и доступ к боту: иначе он не увидит
+            # ни карточек, ни ответов на команды.
+            self.store.add_bot_admin(chat_id, added_by=actor)
+            self.admin_chat_ids.add(chat_id)
+            self.super_admin_ids.add(chat_id)
+        else:
+            self.super_admin_ids.discard(chat_id)
+            # Доступ к заказам сохраняем: снимается только роль настроек.
+        log.info("super admin %s: %s by %s", "granted" if enabled else "revoked", chat_id, actor)
+        if changed:
+            status = "назначен администратором настроек" if enabled else (
+                "больше не администратор настроек"
+            )
+            await self._reply(
+                update, f"✅ <code>{chat_id}</code> {status}.", parse_mode="HTML"
+            )
+        else:
+            state = "уже администратор настроек" if enabled else (
+                "и так не администратор настроек"
+            )
+            await self._reply(update, f"ℹ️ <code>{chat_id}</code> {state}.", parse_mode="HTML")
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обрабатывает callback от inline-кнопок."""
@@ -1689,6 +1866,10 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
             if not handled:
                 # Префикс знакомый, хвост нет — понятная ошибка вместо «unknown».
                 await query.answer("Неизвестное действие личных фильтров.", show_alert=True)
+
+        # ------------------------------------------------------------ меню настроек
+        elif data.startswith("settings:"):
+            await self._handle_settings_callback(update, query, data)
 
         elif data.startswith(("fav:", "unfav:")):
             await self._handle_favorite_callback(update, query, data)

@@ -166,6 +166,7 @@ class FakeStore:
         self.approved: list[int] = []
         self.rejected: list[int] = []
         self.bot_admins: set[int] = set()
+        self.super_admins: set[int] = set()
         self.subscribers: dict[int, dict[str, Any]] = {}
         # Личные фильтры и избранное: минимальная in-memory имитация таблиц.
         self.filters: dict[int, UserFilterPrefs] = {}
@@ -185,6 +186,23 @@ class FakeStore:
         if chat_id not in self.bot_admins:
             return False
         self.bot_admins.discard(chat_id)
+        return True
+
+    def list_super_admins(self) -> set[int]:
+        return set(self.super_admins)
+
+    def set_super_admin(
+        self, chat_id: int, enabled: bool, added_by: int | None = None
+    ) -> bool:
+        if enabled:
+            if chat_id in self.super_admins:
+                return False
+            self.super_admins.add(chat_id)
+            self.bot_admins.add(chat_id)
+            return True
+        if chat_id not in self.super_admins:
+            return False
+        self.super_admins.discard(chat_id)
         return True
 
     def add_subscriber_request(
@@ -886,7 +904,8 @@ async def test_status_shows_last_cycle_and_pending_count() -> None:
 
 
 @pytest.mark.asyncio
-async def test_settings_shows_platforms_filters_and_runtime() -> None:
+async def test_settings_hub_shows_all_sections_to_admin() -> None:
+    """Админ видит в меню настроек все разделы, включая общие."""
     controller = build_controller()
     controller.interval_seconds = 300
     update = FakeUpdate()
@@ -894,9 +913,213 @@ async def test_settings_shows_platforms_filters_and_runtime() -> None:
     await controller._cmd_settings(update, ctx())
 
     text = update.message.replies[0][0]
-    assert "fl\\_ru" in text
-    assert "programming" in text
-    assert "300" in text
+    markup = update.message.replies[0][1]["reply_markup"]
+    labels = [button.text for row in markup.inline_keyboard for button in row]
+    assert "⚙️ Основные" in labels
+    assert "🛠 Администрирование" in labels
+    assert "✉️ Письма" in labels
+    assert "👤 Профиль" in labels
+    assert "🔧 Настройки" in labels
+    assert "📂 Фильтры категорий" in labels
+    assert "🌐 Фильтры бирж" in labels
+    assert "📡 Мониторинг заказов" in labels
+    assert "Выберите раздел" in text
+
+
+@pytest.mark.asyncio
+async def test_settings_hub_hides_admin_sections_from_subscriber(tmp_path: Any) -> None:
+    """Подписчику доступны только три личных раздела — остальных нет вовсе."""
+    store = JobStore(tmp_path / "hub.db")
+    try:
+        store.add_bot_admin(555000111, added_by=ADMIN_ID)
+        controller = build_controller(store=store)
+        update = FakeUpdate(user_id=555000111)
+
+        await controller._cmd_settings(update, ctx())
+
+        markup = update.message.replies[0][1]["reply_markup"]
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+        assert labels == [
+            "🔧 Настройки",
+            "📂 Фильтры категорий",
+            "🌐 Фильтры бирж",
+            "📡 Мониторинг заказов",
+        ]
+        callbacks = [
+            button.callback_data for row in markup.inline_keyboard for button in row
+        ]
+        assert "settings:admin" not in callbacks
+        assert "settings:letters" not in callbacks
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_subscriber_cannot_open_admin_sections(tmp_path: Any) -> None:
+    """Прямой запрос админского раздела и callback дают «Недостаточно прав»."""
+    store = JobStore(tmp_path / "hub2.db")
+    try:
+        store.add_bot_admin(555000111, added_by=ADMIN_ID)
+        controller = build_controller(store=store)
+
+        by_command = FakeUpdate(user_id=555000111)
+        await controller._cmd_settings(by_command, ctx("admin"))
+        assert "Недостаточно прав" in by_command.message.replies[0][0]
+
+        by_callback = FakeUpdate(user_id=555000111, callback="settings:main", with_message=False)
+        await controller._handle_callback(by_callback, ctx())
+        alerts = [answer[0] for answer in by_callback.callback_query.answers if answer[0]]
+        assert any("Недостаточно прав" in (alert or "") for alert in alerts)
+        assert not by_callback.callback_query.edits
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_subscriber_opens_monitoring_and_filters_sections(tmp_path: Any) -> None:
+    """Личные разделы открываются подписчику и через команду, и по кнопке."""
+    store = JobStore(tmp_path / "hub3.db")
+    try:
+        store.add_bot_admin(555000111, added_by=ADMIN_ID)
+        controller = build_controller(store=store)
+
+        monitoring = FakeUpdate(user_id=555000111)
+        await controller._cmd_settings(monitoring, ctx("monitoring"))
+        assert "Мониторинг заказов" in monitoring.message.replies[0][0]
+
+        filters = FakeUpdate(user_id=555000111, callback="settings:cat_filters", with_message=False)
+        await controller._handle_callback(filters, ctx())
+        assert filters.callback_query.edits
+        assert "Мои фильтры" in filters.callback_query.edits[0][0]
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_set_admin_grants_settings_access_and_persists(tmp_path: Any) -> None:
+    """/set_admin открывает разделы настроек и переживает рестарт."""
+    store = JobStore(tmp_path / "admins2.db")
+    try:
+        store.add_bot_admin(555000111, added_by=ADMIN_ID)
+        controller = build_controller(store=store)
+        update = FakeUpdate(user_id=ADMIN_ID)
+
+        await controller._cmd_set_admin(update, ctx("555000111"))
+
+        assert "назначен администратором настроек" in update.message.replies[0][0]
+        assert 555000111 in controller.super_admin_ids
+        assert 555000111 in controller.admin_chat_ids
+        assert store.list_super_admins() == {555000111}
+
+        # Права реально работают: админский раздел открывается.
+        admin_update = FakeUpdate(user_id=555000111)
+        await controller._cmd_settings(admin_update, ctx("admin"))
+        assert "Недостаточно прав" not in admin_update.message.replies[0][0]
+        assert "Администрирование" in admin_update.message.replies[0][0]
+
+        fresh = build_controller(store=JobStore(tmp_path / "admins2.db"))
+        assert 555000111 in fresh.super_admin_ids
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_unset_admin_keeps_order_access(tmp_path: Any) -> None:
+    """/unset_admin снимает роль настроек, но не доступ к заказам."""
+    store = JobStore(tmp_path / "admins3.db")
+    try:
+        store.add_bot_admin(555000111, added_by=ADMIN_ID)
+        controller = build_controller(store=store)
+        admin = FakeUpdate(user_id=ADMIN_ID)
+        await controller._cmd_set_admin(admin, ctx("555000111"))
+        await controller._cmd_unset_admin(admin, ctx("555000111"))
+
+        assert 555000111 not in controller.super_admin_ids
+        assert 555000111 in controller.admin_chat_ids
+
+        update = FakeUpdate(user_id=555000111)
+        await controller._cmd_jobs(update, ctx())
+        assert "⛔" not in update.message.replies[0][0]
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_only_super_admin_can_assign_roles(tmp_path: Any) -> None:
+    """Обычный подписчик не может выдать себе или другому роль администратора."""
+    store = JobStore(tmp_path / "admins4.db")
+    try:
+        store.add_bot_admin(555000111, added_by=ADMIN_ID)
+        controller = build_controller(store=store)
+        update = FakeUpdate(user_id=555000111)
+
+        await controller._cmd_set_admin(update, ctx("555000111"))
+
+        assert "Недостаточно прав" in update.message.replies[0][0]
+        assert store.list_super_admins() == set()
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_set_admin_rejects_bad_input_and_env_admins(tmp_path: Any) -> None:
+    """/set_admin проверяет формат ID и не трогает администраторов из .env."""
+    store = JobStore(tmp_path / "admins5.db")
+    try:
+        controller = build_controller(store=store)
+        update = FakeUpdate(user_id=ADMIN_ID)
+
+        await controller._cmd_set_admin(update, ctx("abc"))
+        assert "Использование" in update.message.replies[0][0]
+
+        await controller._cmd_set_admin(update, ctx(str(ADMIN_ID)))
+        assert ".env" in update.message.replies[1][0]
+        assert store.list_super_admins() == set()
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_admin_cannot_revoke_own_role(tmp_path: Any) -> None:
+    """Самоблокировка запрещена: иначе управлять настройками станет некому."""
+    store = JobStore(tmp_path / "admins6.db")
+    try:
+        controller = build_controller(store=store)
+        update = FakeUpdate(user_id=ADMIN_ID)
+
+        await controller._cmd_unset_admin(update, ctx(str(ADMIN_ID)))
+
+        assert ".env" in update.message.replies[0][0]
+        assert ADMIN_ID in controller.super_admin_ids
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_admin_commands_require_super_admin_rights(tmp_path: Any) -> None:
+    """Команды конвейера закрыты для обычного подписчика."""
+    store = JobStore(tmp_path / "admins7.db")
+    try:
+        store.add_bot_admin(555000111, added_by=ADMIN_ID)
+        controller = build_controller(store=store)
+        update = FakeUpdate(user_id=555000111)
+
+        for call in (
+            lambda: controller._cmd_platforms(update, ctx()),
+            lambda: controller._cmd_categories(update, ctx()),
+            lambda: controller._cmd_score(update, ctx()),
+            lambda: controller._cmd_send(update, ctx()),
+            lambda: controller._cmd_set(update, ctx("runtime.dry_run", "false")),
+            lambda: controller._cmd_reload(update, ctx()),
+        ):
+            await call()
+
+        denials = [text for text, _ in update.message.replies if "Недостаточно прав" in text]
+        assert len(denials) == 6
+        # Настройки не изменились.
+        assert controller.config.runtime.dry_run is True
+    finally:
+        store.close()
 
 
 @pytest.mark.asyncio
@@ -1779,7 +2002,7 @@ async def test_start_registers_handlers_and_polling(
     await controller.start()
 
     assert controller.is_running is True
-    assert len(controller.app.handlers) == 36
+    assert len(controller.app.handlers) == 38
     assert controller.app.initialized and controller.app.started
     assert controller.app.updater.started is True
     # В меню Telegram (кнопка «/») есть все команды, включая /menu и /help.
