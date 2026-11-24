@@ -701,14 +701,17 @@ async def test_new_admin_receives_cards_immediately(tmp_path: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_denied_start_shows_own_id() -> None:
-    """Без базы отказ подсказывает собственный ID и команду /start для заявки."""
+    """Без базы отказ показывает ID и кнопку «📩 Подписаться»."""
     controller = build_controller()
     update = FakeUpdate(user_id=777)
 
     await controller._cmd_start(update, ctx())
 
     reply = update.message.replies[0][0]
-    assert "777" in reply and "/start" in reply
+    markup = update.message.replies[0][1]["reply_markup"]
+    assert "777" in reply
+    assert "Подписаться" in reply
+    assert markup.inline_keyboard[0][0].callback_data == "sub:request"
 
 
 # --------------------------------------------------------------------------- #
@@ -768,11 +771,11 @@ async def test_subscription_approve_grants_access() -> None:
 
     # Пользователю ушло точное сообщение «Вы подписаны».
     user_messages = [m for m in controller.app.bot.sent if m["chat_id"] == 777]
-    assert user_messages and user_messages[-1]["text"] == "Вы подписаны"
+    assert user_messages and user_messages[-1]["text"].startswith("Вы подписаны")
     # Доступ выдан сразу и записан в базу (переживает рестарт).
     assert 777 in controller.admin_chat_ids
     assert 777 in store.bot_admins
-    assert store.subscribers[777]["status"] == "approved"
+    assert store.subscribers[777]["status"] == "active"
 
 
 @pytest.mark.asyncio
@@ -786,7 +789,7 @@ async def test_subscription_reject_denies_access() -> None:
     await controller._handle_callback(reject, ctx())
 
     user_messages = [m for m in controller.app.bot.sent if m["chat_id"] == 777]
-    assert user_messages and user_messages[-1]["text"] == "Заявка отклонена"
+    assert user_messages and user_messages[-1]["text"].startswith("Заявка отклонена")
     assert 777 not in controller.admin_chat_ids
     assert 777 not in store.bot_admins
     assert store.subscribers[777]["status"] == "rejected"
@@ -794,7 +797,7 @@ async def test_subscription_reject_denies_access() -> None:
     # Повторный /start отклонённого не создаёт новую заявку.
     again = FakeUpdate(user_id=777)
     await controller._cmd_start(again, ctx())
-    assert "Заявка отклонена" in again.message.replies[0][0]
+    assert "заявка была отклонена" in again.message.replies[0][0]
     assert 777 not in controller.admin_chat_ids
 
 
@@ -813,7 +816,7 @@ async def test_subscription_decision_is_idempotent() -> None:
     alerts = [a for a in second.callback_query.answers if a[0]]
     assert any("уже обработана" in (a[0] or "") for a in alerts)
     assert 777 in controller.admin_chat_ids
-    assert store.subscribers[777]["status"] == "approved"
+    assert store.subscribers[777]["status"] == "active"
 
 
 @pytest.mark.asyncio
@@ -864,7 +867,7 @@ async def test_deluser_marks_subscription_rejected(tmp_path: Any) -> None:
 
         again = FakeUpdate(user_id=555000111)
         await controller._cmd_start(again, ctx())
-        assert "Заявка отклонена" in again.message.replies[0][0]
+        assert "заявка была отклонена" in again.message.replies[0][0]
         assert 555000111 not in controller.admin_chat_ids
     finally:
         store.close()
@@ -883,6 +886,180 @@ async def test_users_lists_pending_requests(tmp_path: Any) -> None:
     text = update.message.replies[0][0]
     assert "777" in text and "новый" in text.lower()
     assert "Заявки" in text
+
+
+@pytest.mark.asyncio
+async def test_subscribe_button_creates_request() -> None:
+    """Кнопка «📩 Подписаться» отправляет заявку без команды /start."""
+    store = FakeStore()
+    controller = build_controller(store=store)
+    update = FakeUpdate(user_id=777, callback="sub:request", with_message=False)
+
+    await controller._handle_callback(update, ctx())
+
+    assert store.subscribers[777]["status"] == "pending"
+    assert update.callback_query.answers
+    # Админ получил карточку заявки с кнопками решения.
+    callbacks = [
+        button.callback_data
+        for call in controller.app.bot.sent
+        for row in call["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    assert "sub_approve:777" in callbacks and "sub_reject:777" in callbacks
+
+
+@pytest.mark.asyncio
+async def test_subscribe_button_allows_retry_after_rejection() -> None:
+    """Отклонённый пользователь может отправить заявку повторно."""
+    store = FakeStore()
+    controller = build_controller(store=store)
+    await controller._cmd_start(FakeUpdate(user_id=777), ctx())
+    reject = FakeUpdate(user_id=ADMIN_ID, callback="sub_reject:777", with_message=False)
+    await controller._handle_callback(reject, ctx())
+    sent_before = len(controller.app.bot.sent)
+
+    retry = FakeUpdate(user_id=777, callback="sub:request", with_message=False)
+    await controller._handle_callback(retry, ctx())
+
+    assert store.subscribers[777]["status"] == "pending"
+    # Админ снова получил карточку заявки.
+    assert len(controller.app.bot.sent) > sent_before
+    assert 777 not in controller.admin_chat_ids
+
+
+@pytest.mark.asyncio
+async def test_subscribe_button_is_idempotent_while_pending() -> None:
+    """Пока заявка на рассмотрении, повторное нажатие не создаёт новую."""
+    store = FakeStore()
+    controller = build_controller(store=store)
+    await controller._cmd_start(FakeUpdate(user_id=777), ctx())
+    sent_before = len(controller.app.bot.sent)
+
+    again = FakeUpdate(user_id=777, callback="sub:request", with_message=False)
+    await controller._handle_callback(again, ctx())
+
+    assert len(controller.app.bot.sent) == sent_before
+    alerts = [answer[0] for answer in again.callback_query.answers if answer[0]]
+    assert any("рассмотрении" in (alert or "") for alert in alerts)
+
+
+@pytest.mark.asyncio
+async def test_pending_user_cannot_call_commands(tmp_path: Any) -> None:
+    """Gate по подписке: pending не пройдёт ни в команду, ни в callback."""
+    store = JobStore(tmp_path / "gate.db")
+    try:
+        store.add_subscriber_request(555000111, "waiting", "Ожидающий")
+        controller = build_controller(store=store)
+
+        by_command = FakeUpdate(user_id=555000111)
+        await controller._cmd_jobs(by_command, ctx())
+        reply, kwargs = by_command.message.replies[0]
+        assert "рассмотрении" in reply
+        assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "sub:request"
+
+        by_callback = FakeUpdate(
+            user_id=555000111, callback="settings:hub", with_message=False
+        )
+        await controller._handle_callback(by_callback, ctx())
+        alerts = [a[0] for a in by_callback.callback_query.answers if a[0]]
+        assert any("рассмотрении" in (alert or "") for alert in alerts)
+        assert not by_callback.callback_query.edits
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_active_subscriber_passes_gate(tmp_path: Any) -> None:
+    """active проходит gate: команды и callback'и работают."""
+    store = JobStore(tmp_path / "gate2.db")
+    try:
+        store.add_subscriber_request(555000111, "ok", "Активный")
+        store.set_subscriber_status(555000111, "pending")
+        store.set_subscriber_status(555000111, "active")
+        controller = build_controller(store=store)
+        controller.store.add_bot_admin(555000111, added_by=None)
+        controller.admin_chat_ids.add(555000111)
+
+        update = FakeUpdate(user_id=555000111)
+        await controller._cmd_filters(update, ctx())
+        assert "⛔" not in update.message.replies[0][0]
+        assert "Подписка не активна" not in update.message.replies[0][0]
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_admin_decision_edits_card_and_removes_buttons() -> None:
+    """После решения карточка заявки правится: кнопки исчезают."""
+    store = FakeStore()
+    controller = build_controller(store=store)
+    await controller._cmd_start(FakeUpdate(user_id=777), ctx())
+
+    approve = FakeUpdate(user_id=ADMIN_ID, callback="sub_approve:777", with_message=False)
+    await controller._handle_callback(approve, ctx())
+
+    assert approve.callback_query.edits
+    edited_text = approve.callback_query.edits[0][0]
+    assert "Одобрено" in edited_text
+    assert "777" in edited_text
+
+
+@pytest.mark.asyncio
+async def test_subscription_request_goes_to_super_admins_only(tmp_path: Any) -> None:
+    """Заявка уходит администраторам настроек, а не всем подписчикам."""
+    store = JobStore(tmp_path / "gate3.db")
+    try:
+        store.add_bot_admin(555000111, added_by=ADMIN_ID)
+        controller = build_controller(store=store)
+        await controller._cmd_start(FakeUpdate(user_id=777), ctx())
+
+        recipients = {call["chat_id"] for call in controller.app.bot.sent}
+        assert ADMIN_ID in recipients
+        assert 555000111 not in recipients
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_audience_excludes_non_active_subscribers(tmp_path: Any) -> None:
+    """Карточки заказов получают только активные подписки и админы."""
+    store = JobStore(tmp_path / "gate4.db")
+    try:
+        for chat_id, status in ((111, "active"), (222, "pending"), (333, "rejected")):
+            store.add_subscriber_request(chat_id, None, None)
+            store.set_subscriber_status(chat_id, status)
+        controller = build_controller(store=store)
+
+        assert controller.audience_chat_ids() == {ADMIN_ID, 111}
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_approved_status_is_migrated_to_active(tmp_path: Any) -> None:
+    """Статус 'approved' из старых баз читается и мигрируется как active."""
+    store = JobStore(tmp_path / "legacy.db")
+    try:
+        store.add_subscriber_request(555000111, None, None)
+        # Эмулируем запись старой версии, минуя API нового статуса.
+        store._conn.execute(
+            "UPDATE bot_subscribers SET status = 'approved' WHERE chat_id = ?",
+            (555000111,),
+        )
+        store._conn.commit()
+        controller = build_controller(store=store)
+        assert controller.subscription_status(555000111) == "active"
+
+        # Повторное открытие базы приводит статус к новому имени.
+        store.close()
+        reopened = JobStore(tmp_path / "legacy.db")
+        try:
+            assert reopened.get_subscriber(555000111)["status"] == "active"
+        finally:
+            reopened.close()
+    finally:
+        pass
 
 
 # --------------------------------------------------------------------------- #

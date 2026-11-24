@@ -201,6 +201,13 @@ class JobStore:
                 self._conn.execute(
                     "ALTER TABLE bot_admins ADD COLUMN is_super INTEGER NOT NULL DEFAULT 0"
                 )
+            # --- миграция статусов подписки: approved → active ---
+            # Раньше одобренная подписка называлась 'approved'. Теперь статусы
+            # pending/active/rejected; старые строки приводим к новому имени,
+            # иначе одобренные пользователи потеряли бы доступ.
+            self._conn.execute(
+                "UPDATE bot_subscribers SET status = 'active' WHERE status = 'approved'"
+            )
             # Индекс создаётся после миграции: в старой базе колонки status
             # ещё нет, и CREATE INDEX из SCHEMA упал бы.
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")

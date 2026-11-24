@@ -441,14 +441,24 @@ COMMAND_HELP: tuple[CommandHelp, ...] = (
 
 COMMAND_HELP_BY_NAME = {item.name: item for item in COMMAND_HELP}
 
-# Статусы заявки на подписку в таблице bot_subscribers.
+# Статусы подписки в таблице bot_subscribers. Требование — pending / active /
+# rejected. Историческое значение 'approved' (старые базы) приводится к 'active'
+# миграцией в storage.py, поэтому в коде сравнение идёт только с active.
 SUB_PENDING = "pending"
-SUB_APPROVED = "approved"
+SUB_ACTIVE = "active"
 SUB_REJECTED = "rejected"
+# Обратная совместимость для кода и тестов, которые ещё пишут «approved».
+SUB_APPROVED = SUB_ACTIVE
 
 # Тексты, которые получает пользователь по решению админа.
 MSG_SUBSCRIBED = "Вы подписаны"
 MSG_REJECTED = "Заявка отклонена"
+MSG_PENDING = "Заявка на подписку ожидает решения администратора."
+
+# Кнопки меню подписки.
+SUBSCRIBE_LABEL = "📩 Подписаться"
+SUBSCRIBE_CALLBACK = "sub:request"
+SUBSCRIBE_HINT = "Если хотите попробовать снова — нажмите «📩 Подписаться» под сообщением."
 
 # Кнопки под полем ввода. Метка кнопки совпадает с командой, поэтому нажатие
 # отправляет обычное сообщение «/menu» или «/help» и не требует отдельного
@@ -635,6 +645,23 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
             chat_id is not None and self._is_admin(chat_id)
         )
 
+    def _update_ids(self, update: Update) -> tuple[int | None, int | None]:
+        user_id = update.effective_user.id if update.effective_user else None
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        return user_id, chat_id
+
+    def _is_subscribed_update(self, update: Update) -> bool:
+        """True, если у отправителя активная подписка (или он админ).
+
+        Проверяются оба ID: в личке они совпадают, в группе подписка
+        привязана к чату, поэтому решает тот, у кого статус активный.
+        """
+        user_id, chat_id = self._update_ids(update)
+        for candidate in (user_id, chat_id):
+            if candidate is not None and self.subscription_status(candidate) == SUB_ACTIVE:
+                return True
+        return False
+
     def _super_admin_id(self, update: Update) -> int | None:
         """ID отправителя, если это администратор из .env, иначе None."""
         user_id = update.effective_user.id if update.effective_user else None
@@ -677,27 +704,60 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
             await query.answer("⛔ Недостаточно прав.", show_alert=True)
 
     def audience_chat_ids(self) -> set[int]:
-        """Все чаты, которые могут получать заказы (админы и подписчики)."""
-        return set(self.admin_chat_ids)
+        """Все чаты, которые могут получать заказы: активные подписки.
+
+        Админы из .env входят всегда. Подписчики попадают сюда только при
+        статусе active: пока заявка pending или отклонена, карточки не идут.
+        """
+        chat_ids = set(self.admin_chat_ids)
+        if self.store is not None:
+            for row in self.store.list_subscribers(SUB_ACTIVE):
+                chat_ids.add(int(row["chat_id"]))
+            # Совместимость со старыми базами до миграции статусов.
+            for row in self.store.list_subscribers("approved"):
+                chat_ids.add(int(row["chat_id"]))
+        return chat_ids
 
     async def _ensure_admin(self, update: Update) -> bool:
-        """Возвращает True для разрешённого пользователя/чата, иначе отвечает и возвращает False.
+        """Пускает только при активной подписке, иначе объясняет как её получить.
+
+        Это единственный gate: команды, callback'и и карточки проверяют одно и
+        то же условие. Пользователь без записи в bot_subscribers и без
+        одобренной заявки видит кнопку «📩 Подписаться».
         """
         if self._is_admin_update(update):
             return True
         # ID отказника пишем в журнал и показываем ему самому: заявка на
         # подписку отправляется через /start без @userinfobot.
-        user_id = update.effective_user.id if update.effective_user else None
-        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id, chat_id = self._update_ids(update)
         log.warning("Доступ запрещён: user_id=%s chat_id=%s", user_id, chat_id)
-        if update.message:
-            own = user_id if user_id is not None else chat_id
+        own = user_id if user_id is not None else chat_id
+        status = self.subscription_status(own) if own is not None else None
+        if status == SUB_PENDING:
+            text = (
+                "⏳ Ваша заявка на рассмотрении.\n"
+                f"Ваш ID: {own}. Доступ откроется после одобрения администратором."
+            )
+        elif status == SUB_REJECTED:
+            text = (
+                "❌ Заявка отклонена, доступа нет.\n"
+                "Если это ошибка — отправьте заявку снова кнопкой «📩 Подписаться»."
+            )
+        else:
             hint = (
-                f" Ваш ID: {own} — нажмите /start, чтобы отправить заявку на подписку."
+                f"Ваш ID: {own}. Нажмите «📩 Подписаться», чтобы отправить заявку."
                 if own is not None
                 else ""
             )
-            await update.message.reply_text("⛔ У вас нет доступа к этому боту." + hint)
+            text = "⛔ Подписка не активна." + (f"\n{hint}" if hint else "")
+        if update.message:
+            await update.message.reply_text(
+                text, reply_markup=self._subscribe_keyboard()
+            )
+        else:
+            query = update.callback_query
+            if query is not None:
+                await query.answer(text, show_alert=True)
         return False
 
     @staticmethod
@@ -778,6 +838,46 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
                         log.error("Failed to send Telegram message to %s: %s", chat_id, e2)
         return delivered
 
+    async def _send_to_super_admins(
+        self, text: str, *, reply_markup: InlineKeyboardMarkup | None = None
+    ) -> bool:
+        """Отправляет сообщение только администраторам настроек.
+
+        Нужно для заявок на подписку: решать, кого пускать, должен админ, а
+        не любой подписчик — иначе персональные данные заявителя расходятся
+        по всем чатам.
+        """
+        if not self.app or not self.is_running:
+            return False
+        delivered = False
+        parts = _chunk(text)
+        for chat_id in sorted(self.super_admin_ids):
+            for index, part in enumerate(parts):
+                try:
+                    await self._bot_send(
+                        chat_id=chat_id,
+                        text=part,
+                        parse_mode="Markdown",
+                        reply_markup=reply_markup if index == len(parts) - 1 else None,
+                        disable_web_page_preview=True,
+                    )
+                    delivered = True
+                except Exception as e:  # noqa: BLE001 - один чат не должен ломать остальные
+                    if not self._parse_error(e):
+                        log.error("Failed to send Telegram message to %s: %s", chat_id, e)
+                        continue
+                    try:
+                        await self._bot_send(
+                            chat_id=chat_id,
+                            text=_plain_text(part),
+                            reply_markup=reply_markup if index == len(parts) - 1 else None,
+                            disable_web_page_preview=True,
+                        )
+                        delivered = True
+                    except Exception as e2:  # noqa: BLE001
+                        log.error("Failed to send Telegram message to %s: %s", chat_id, e2)
+        return delivered
+
     async def _bot_send(self, **kwargs: Any) -> None:
         """Отправка с ретраями на rate limit (экспоненциальная задержка)."""
         if not self.app:
@@ -801,49 +901,67 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
                 await asyncio.sleep(delay)
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обрабатывает команду /start.
+        """Обрабатывает команду /start по статусу подписки.
 
-        Для тех, у кого уже есть доступ, — приветствие. Для нового
-        пользователя — заявка на подписку: она уходит админам с кнопками
-        одобрения/отклонения, а доступ выдаётся только после одобрения.
+        active (и админы) — приветствие с тем набором команд, который им
+        доступен; нет записи — заявка уходит админам с кнопками решения;
+        pending — напоминание, что заявка на рассмотрении; rejected —
+        сообщение об отказе с кнопкой «📩 Подписаться» для повторной попытки.
         """
-        if self._is_admin_update(update):
+        user_id, chat_id = self._update_ids(update)
+        owner = chat_id if chat_id is not None else user_id
+        if owner is not None and self.subscription_status(owner) == SUB_ACTIVE:
             await self._send_welcome(update)
             return
         await self._handle_subscription_request(update)
 
     async def _send_welcome(self, update: Update) -> None:
         """Приветствие панели управления для пользователя с доступом."""
-        text = (
-            "🤖 *Freelance Bot*\n\n"
+        is_admin = self._is_super_admin_update(update)
+        parts = [
+            "🤖 *Freelance Bot*",
+            "",
             "Заказы приходят по вашим личным фильтрам. Порогов балла нет: "
-            "показывается всё, что прошло фильтр.\n\n"
-            "*Мои заказы:*\n"
-            "/jobs — последние 5/10/30 заказов по вашим фильтрам\n"
-            "/favorites — избранные заказы (♥ на карточке)\n"
-            "/status — статус и последний цикл\n"
-            "/stats — статистика за 7 дней\n\n"
-            "*Мои фильтры:*\n"
-            "/filters — категории, подкатегории, биржи, мин. цена\n\n"
-            "*Администрирование:*\n"
-            "/platforms — платформы: список, добавление, удаление\n"
-            "/categories — общий фильтр сбора\n"
-            "/score — штраф за красные флаги и свежесть\n"
-            "/interval — интервал циклов (900-3600 с)\n\n"
-            "*Письма и профиль:*\n"
-            "/llm — модель, endpoint, ключ, temperature, провайдеры\n"
-            "/prompt — системный промпт и доп. инструкции\n"
-            "/style — тон, длина, эмодзи, запрещённые фразы\n"
-            "/profile — имя, опыт, локация, саммари\n\n"
-            "*Служебное:*\n"
-            "/settings — все настройки, `/settings all` — полный дамп\n"
-            "/set, /get — изменить/посмотреть параметр\n"
-            "/pause, /resume — пауза сбора\n"
-            "/reload — перечитать файлы, /reset — сбросить оверлей\n"
-            "/export — выгрузить эффективные настройки\n"
-            "/menu — все команды, /help — подробная справка\n\n"
-            "Кнопки /menu и /help всегда доступны под полем ввода."
-        )
+            "показывается всё, что прошло фильтр.",
+            "",
+            "*Мои заказы:*",
+            "/jobs — последние 5/10/30 заказов по вашим фильтрам",
+            "/favorites — избранные заказы (♥ на карточке)",
+            "/status — статус и последний цикл",
+            "/stats — статистика за 7 дней",
+            "",
+            "*Мои фильтры:*",
+            "/filters — категории, подкатегории, биржи, мин. цена",
+            "",
+            "*Настройки:*",
+            "/settings — разделы настроек по вашим правам",
+            "/menu — все команды, /help — подробная справка",
+        ]
+        if is_admin:
+            parts += [
+                "",
+                "*Администрирование:*",
+                "/platforms — платформы: список, добавление, удаление",
+                "/categories — общий фильтр сбора",
+                "/score — штраф за красные флаги и свежесть",
+                "/interval — интервал циклов (900-3600 с)",
+                "/users, /adduser, /deluser, /set_admin — доступ",
+                "",
+                "*Письма и профиль:*",
+                "/llm — модель, endpoint, ключ, temperature, провайдеры",
+                "/prompt — системный промпт и доп. инструкции",
+                "/style — тон, длина, эмодзи, запрещённые фразы",
+                "/profile — имя, опыт, локация, саммари",
+                "/send, /pricing, /markup, /minprice — отправка и цена",
+                "",
+                "*Служебное:*",
+                "/set, /get — изменить/посмотреть параметр",
+                "/pause, /resume — пауза сбора",
+                "/reload — перечитать файлы, /reset — сбросить оверлей",
+                "/export — выгрузить эффективные настройки",
+            ]
+        parts += ["", "Кнопки /menu и /help всегда доступны под полем ввода."]
+        text = "\n".join(parts)
         await self._reply(
             update, text, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD
         )
@@ -852,6 +970,28 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
         )
 
     # ------------------------------------------------------------------ подписка
+    def subscription_status(self, chat_id: int) -> str | None:
+        """Статус подписки чата: pending/active/rejected или None.
+
+        Админы из .env считаются активными всегда — их доступ не зависит от
+        заявки. Это единственное место, где решается вопрос «пускать или нет»,
+        поэтому gate одинаков для команд, callback'ов и карточек.
+        """
+        if self._is_admin(chat_id):
+            return SUB_ACTIVE
+        if self.store is None:
+            return None
+        row = self.store.get_subscriber(chat_id)
+        if row is None:
+            return None
+        status = str(row.get("status") or "")
+        # 'approved' — историческое имя активной подписки в старых базах.
+        if status in {SUB_ACTIVE, "approved"}:
+            return SUB_ACTIVE
+        if status == SUB_REJECTED:
+            return SUB_REJECTED
+        return SUB_PENDING
+
     async def _handle_subscription_request(self, update: Update) -> None:
         """Проводит нового пользователя через заявку на подписку.
 
@@ -878,30 +1018,90 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
         last = getattr(user, "last_name", "") or "" if user is not None else ""
         full_name = " ".join(part for part in (first, last) if part) or None
 
-        subscriber = self.store.get_subscriber(chat_id)
-        if subscriber is None:
+        status = self.subscription_status(chat_id)
+        if status is None:
             self.store.add_subscriber_request(chat_id, username, full_name)
             await self._notify_subscription_request(chat_id, username, full_name)
             log.info("subscription requested: chat_id=%s username=%s", chat_id, username)
-            await update.message.reply_text(
-                f"📨 Заявка на подписку отправлена администратору.\n"
-                f"Ваш ID: {chat_id}. После одобрения вы получите доступ к боту."
+            await self._reply(
+                update,
+                "📨 Заявка на подписку отправлена администратору.\n"
+                f"Ваш ID: {chat_id}. После одобрения вы получите доступ к боту.",
+                reply_markup=self._subscribe_keyboard(),
             )
             return
 
-        status = subscriber.get("status")
         if status == SUB_PENDING:
-            await update.message.reply_text(
-                "⏳ Ваша заявка уже отправлена и ожидает одобрения администратора."
+            await self._reply(
+                update,
+                "⏳ Ваша заявка уже отправлена и ожидает одобрения администратора.\n"
+                f"Ваш ID: {chat_id}.",
+                reply_markup=self._subscribe_keyboard(),
             )
-        elif status == SUB_APPROVED:
-            # Самовосстановление: подписка одобрена, но доступа нет (например,
-            # запись в bot_admins потерялась). Выдаём снова.
+        elif status == SUB_ACTIVE:
+            # Самовосстановление: подписка активна, но записи в bot_admins нет
+            # (например, база пересоздана). Выдаём доступ снова.
             if self.store.add_bot_admin(chat_id, added_by=None):
                 self.admin_chat_ids.add(chat_id)
-            await update.message.reply_text(MSG_SUBSCRIBED)
+            await self._send_welcome(update)
         else:
-            await update.message.reply_text(MSG_REJECTED)
+            await self._reply(
+                update,
+                "❌ Ваша заявка была отклонена.\n"
+                "Если это ошибка — нажмите «📩 Подписаться», чтобы отправить заявку снова.",
+                reply_markup=self._subscribe_keyboard(),
+            )
+
+    def _subscribe_keyboard(self) -> InlineKeyboardMarkup:
+        """Кнопка «📩 Подписаться» для тех, у кого ещё нет активной подписки."""
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton(SUBSCRIBE_LABEL, callback_data=SUBSCRIBE_CALLBACK)]]
+        )
+
+    async def _handle_subscribe_callback(self, update: Update, query: CallbackQuery) -> None:
+        """Обрабатывает кнопку «📩 Подписаться».
+
+        Повторная заявка после отказа допустима: админ мог отклонить случайно,
+        а человек — исправить ситуацию. Пока заявка на рассмотрении, повторное
+        нажатие не создаёт дубликатов и не дёргает админов.
+        """
+        chat = update.effective_chat
+        user = update.effective_user
+        chat_id = chat.id if chat is not None else (user.id if user is not None else None)
+        if chat_id is None:
+            await query.answer("⚠️ Не удалось определить чат.", show_alert=True)
+            return
+        if self.store is None:
+            await query.answer("🗄️ База недоступна.", show_alert=True)
+            return
+
+        status = self.subscription_status(chat_id)
+        if status == SUB_ACTIVE:
+            await query.answer("✅ У вас уже есть активная подписка.")
+            return
+        if status == SUB_PENDING:
+            await query.answer("⏳ Заявка уже на рассмотрении.", show_alert=True)
+            return
+
+        username = getattr(user, "username", None) if user is not None else None
+        first = getattr(user, "first_name", "") or "" if user is not None else ""
+        last = getattr(user, "last_name", "") or "" if user is not None else ""
+        full_name = " ".join(part for part in (first, last) if part) or None
+
+        # После отказа запись уже есть: возвращаем её в pending, чтобы админ
+        # увидел повторную заявку, а история решения не потерялась.
+        self.store.upsert_subscriber_status(chat_id, SUB_PENDING)
+        self.store.add_subscriber_request(chat_id, username, full_name)
+        await self._notify_subscription_request(chat_id, username, full_name)
+        log.info("subscription re-requested: chat_id=%s", chat_id)
+        await query.answer("📨 Заявка отправлена администратору.")
+        try:
+            await query.edit_message_text(
+                "📨 Заявка на подписку отправлена администратору.\n"
+                f"Ваш ID: {chat_id}. После одобрения вы получите доступ к боту."
+            )
+        except TelegramError as exc:  # pragma: no cover - сообщение могло устареть
+            log.debug("cannot edit subscribe message: %s", exc)
 
     async def _notify_subscription_request(
         self, user_id: int, username: str | None, full_name: str | None
@@ -927,7 +1127,7 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
                 ]
             ]
         )
-        await self._send_to_admins(text, reply_markup=keyboard)
+        await self._send_to_super_admins(text, reply_markup=keyboard)
 
     async def _notify_user(self, chat_id: int, text: str) -> None:
         """Прямое сообщение пользователю с обработкой ошибок доставки."""
@@ -1716,14 +1916,25 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
         if not query or not query.data:
             return
 
-        if not self._is_admin_update(update):
+        # Кнопка «📩 Подписаться» — единственный callback, доступный без
+        # активной подписки: иначе новый пользователь не смог бы её получить.
+        if query.data == SUBSCRIBE_CALLBACK:
+            await self._handle_subscribe_callback(update, query)
+            return
+
+        if not self._is_subscribed_update(update):
             own = update.effective_user.id if update.effective_user else None
+            chat_id = update.effective_chat.id if update.effective_chat else None
             log.warning(
-                "Доступ запрещён (callback): user_id=%s chat_id=%s",
-                own,
-                update.effective_chat.id if update.effective_chat else None,
+                "Доступ запрещён (callback): user_id=%s chat_id=%s", own, chat_id
             )
-            alert = "⛔ У вас нет доступа к этому боту."
+            status = self.subscription_status(own or chat_id or 0)
+            if status == SUB_PENDING:
+                alert = "⏳ Ваша заявка на рассмотрении."
+            elif status == SUB_REJECTED:
+                alert = "❌ Заявка отклонена. Отправьте новую кнопкой «📩 Подписаться»."
+            else:
+                alert = "⛔ Подписка не активна. Нажмите «📩 Подписаться»."
             if own is not None:
                 alert += f" Ваш ID: {own}"
             await query.answer(alert, show_alert=True)
@@ -1936,35 +2147,38 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
             if subscriber is None:
                 await query.answer("Заявка не найдена.", show_alert=True)
                 return
-            if subscriber.get("status") != SUB_PENDING or target_id in self.admin_chat_ids:
+            status = str(subscriber.get("status") or "")
+            if status not in {SUB_PENDING, "rejected"} or target_id in self.admin_chat_ids:
                 await query.answer("Заявка уже обработана.", show_alert=True)
                 return
 
             admin_id = query.from_user.id
+            name = subscriber.get("full_name") or "пользователь"
             if action == "sub_approve":
                 self.store.set_subscriber_status(
-                    target_id, SUB_APPROVED, decided_by=admin_id
+                    target_id, SUB_ACTIVE, decided_by=admin_id
                 )
                 # Доступ живёт в bot_admins: переживает рестарт и сразу
                 # добавляет пользователя к получателям карточек.
                 self.store.add_bot_admin(target_id, added_by=admin_id)
                 self.admin_chat_ids.add(target_id)
                 log.info("admin %s approved subscription %s", admin_id, target_id)
-                name = subscriber.get("full_name") or "пользователь"
-                await query.edit_message_text(
-                    f"✅ Подписка одобрена: {_md(str(name))} ({target_id})."
+                # Карточка заявки правится на месте: кнопки исчезают, в тексте
+                # остаётся решение. Иначе админ видит «висящие» кнопки и жмёт
+                # их повторно.
+                await self._edit_subscription_decision(
+                    query, str(name), target_id, approved=True
                 )
-                await self._notify_user(target_id, MSG_SUBSCRIBED)
+                await self._notify_user(target_id, MSG_SUBSCRIBED + "\n\n" + SUBSCRIBE_HINT)
             else:
                 self.store.set_subscriber_status(
                     target_id, SUB_REJECTED, decided_by=admin_id
                 )
                 log.info("admin %s rejected subscription %s", admin_id, target_id)
-                name = subscriber.get("full_name") or "пользователь"
-                await query.edit_message_text(
-                    f"❌ Заявка отклонена: {_md(str(name))} ({target_id})."
+                await self._edit_subscription_decision(
+                    query, str(name), target_id, approved=False
                 )
-                await self._notify_user(target_id, MSG_REJECTED)
+                await self._notify_user(target_id, MSG_REJECTED + "\n\n" + SUBSCRIBE_HINT)
 
         # ----------------------------------------------------------------- карточки заказов
         # Битые callback_data: проверяем префикс, чтобы отдать понятный ответ.
@@ -2071,6 +2285,26 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
         else:
             await query.answer("⚠️ Неизвестная команда.", show_alert=True)
             log.warning("unknown callback data: %s", data)
+
+    async def _edit_subscription_decision(
+        self, query: CallbackQuery, name: str, target_id: int, *, approved: bool
+    ) -> None:
+        """Правит карточку заявки после решения админа.
+
+        Кнопки убираются: повторное нажатие уже не пройдёт, но «мёртвая»
+        клавиатура выглядит как приглашение нажать ещё раз.
+        """
+        decision = "✅ Одобрено" if approved else "❌ Отклонено"
+        text = (
+            f"📨 *Заявка на подписку* — {decision}\n\n"
+            f"Пользователь: {_md(name)}\n"
+            f"ID: `{target_id}`"
+        )
+        try:
+            await query.edit_message_text(text, parse_mode="Markdown")
+        except TelegramError as exc:
+            # Сообщение могло быть удалено или уже изменено другим админом.
+            log.debug("cannot edit subscription card for %s: %s", target_id, exc)
 
     async def notify_cycle_complete(
         self, jobs_collected: int, jobs_new: int, jobs_eligible: int, messages_generated: int
