@@ -1,0 +1,9 @@
+{
+  "platform": "yandex_services",
+  "url": "https://services.yandex.ru/",
+  "status": 504,
+  "bytes": 19,
+  "server": "",
+  "content_type": "",
+  "set_cookie": "yashr=8400731691793664824; Path=/; Domain=.yandex.ru; Expires=Wed, 03 Nov 2027 00:13:44 GMT; SameSite=None; Secure; HttpOnly; Partitioned"
+}

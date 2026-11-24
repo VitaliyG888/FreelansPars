@@ -1,0 +1,9 @@
+{
+  "platform": "pchel",
+  "url": "https://pchel.net/",
+  "status": 200,
+  "bytes": 29969,
+  "server": "cloudflare",
+  "content_type": "text/html; charset=utf-8",
+  "set_cookie": "hash=1793578544%7C%7C00b662f194c116736dd0e73591574ba370537d00; domain=pchel.net; path=/; expires=Mon, 02-Nov-2026 00:15:44 UTC; secure; HttpOnly"
+}

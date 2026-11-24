@@ -1,0 +1,9 @@
+{
+  "platform": "avito",
+  "url": "https://www.avito.ru/all/predlozheniya_uslug",
+  "status": 439,
+  "bytes": 14889,
+  "server": "QRATOR",
+  "content_type": "text/html; charset=utf-8",
+  "set_cookie": "pow_challenge=nh3PnfVax8Td90cEAZT0Sq2ZS8DrhZ86XVVpOXC6cxkEeFKTd2AYhTrYxJKPTI6rWddnQWCN4XitPM/lK044vNF8dHXheYcKSGCRV9YpwmYisMp49cR4PQ6maJ8UoSgONBY8UsaW08xuo7R5scBofSYaGtfrOw; path=/; expires=Tue, 03-Nov-26 00:18:49 GMT; Max-Age=300; secure; domain=.avito.ru; SameSite=Lax"
+}

@@ -1,0 +1,363 @@
+# ============================================================================
+# Конфигурация freelance-bot
+# Скопируйте в config.yaml и отредактируйте. Секреты хранятся в .env, не здесь.
+# ============================================================================
+runtime:
+  timezone: Europe/Moscow
+  # По умолчанию включён dry-run: письма рендерятся и логируются, но не отправляются.
+  dry_run: true
+  poll_interval_seconds: 900          # 15 минут между полными циклами (900-3600, меняет админ)
+  max_jobs_per_platform: 40
+  request_timeout_seconds: 25
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+  accept_language: "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+
+network:
+  # Стратегия пула прокси по умолчанию. none — прямой запрос: пул задействуют
+  # только площадки с явной proxy_strategy. round_robin — через прокси ходят
+  # все HTTP-площадки (по одному IP на запрос); sticky — домен закрепляется
+  # за одним IP.
+  proxy_strategy: none                  # round_robin | sticky | none
+  proxy_cooldown_seconds: 300
+  respect_robots_txt: true
+  # Вёдра токенов по доменам. Значения намеренно консервативные.
+  # Опционально: pause_min_seconds/pause_max_seconds — human-пауза поверх
+  # вёдра (случайный интервал в этих границах между запросами к домену).
+  default_rate:
+    requests_per_minute: 4
+    burst: 2
+  domains:
+    fl.ru:               { requests_per_minute: 4, burst: 2 }
+    freelance.ru:        { requests_per_minute: 4, burst: 2 }
+    freelancejob.ru:     { requests_per_minute: 4, burst: 2 }
+    pchel.net:           { requests_per_minute: 3, burst: 2 }
+    # kwork: пауза 3-10 с — антибот Qrator ругается на частые однотипные запросы.
+    kwork.ru:            { requests_per_minute: 3, burst: 1, pause_min_seconds: 3, pause_max_seconds: 10 }
+    weblancer.net:       { requests_per_minute: 2, burst: 1 }
+    freelancehunt.com:   { requests_per_minute: 2, burst: 1 }
+    avito.ru:            { requests_per_minute: 1, burst: 1 }
+  backoff:
+    base_seconds: 3
+    max_seconds: 180
+    jitter: true
+    max_retries: 3
+  browser:
+    enabled: true
+    headless: true
+    locale: ru-RU
+    timezone: Europe/Moscow
+    viewport: { width: 1440, height: 900 }
+    # Сколько странице разрешено «устояться» перед извлечением данных.
+    settle_ms: 4500
+    navigation_timeout_ms: 45000
+    # Ожидание автоматического прохождения Cloudflare/Qrator challenge.
+    challenge_wait_ms: 20000
+  # Внешний reader-сервис для площадок, которые блокируют IP сервера на TCP.
+  # Прямой запрос выполняется первым; relay — только запасной путь.
+  relay:
+    enabled: true
+    url_template: "https://r.jina.ai/{url}"
+    timeout_seconds: 90
+    return_format: html                # html | text | markdown
+
+captcha:
+  # Сначала лёгкий путь; решатель вызывается только при подтверждённом challenge.
+  enabled: true
+  provider: capsolver                  # capsolver | twocaptcha
+  # CapSolver поддерживает Yandex SmartCaptcha; 2Captcha требует тариф с RU.
+  solve_yandex_smartcaptcha: true
+  solve_recaptcha_v2: true
+  solve_hcaptcha: true
+  max_attempts: 2
+  timeout_seconds: 180
+
+platforms:
+  fl_ru:
+    enabled: true
+    transport: http
+    listing_url: "https://www.fl.ru/projects/"
+    detail_enrichment: true            # загружать страницу проекта для полного текста
+    # С VPS TCP до fl.ru не устанавливается: пробуем прямой запрос 10 с,
+    # затем идём через network.relay.
+    relay_fallback: true
+    direct_timeout_seconds: 10
+    notes: "Серверный HTML. С VPS прямой TCP закрыт; рабочий путь — reader-relay."
+  freelance_ru:
+    enabled: true
+    transport: http
+    listing_url: "https://freelance.ru/project/search"
+    detail_enrichment: true
+    relay_fallback: true
+    direct_timeout_seconds: 10
+    notes: "Серверный HTML в стиле Inertia; карточки article.task-card. С VPS нужен relay."
+  freelancejob_ru:
+    enabled: true
+    transport: http
+    listing_url: "https://freelancejob.ru/projects/"
+    detail_enrichment: false
+    notes: "Серверный HTML; карточки div.x17. Бюджет иногда ниже рынка."
+  pchel_net:
+    enabled: true
+    transport: http
+    listing_url: "https://pchel.net/projects/"
+    detail_enrichment: false
+    notes: "Серверный HTML; 50 карточек на страницу. Cloudflare на краю, без challenge."
+  kwork_ru:
+    enabled: true
+    transport: http
+    listing_url: "https://kwork.ru/projects"
+    detail_enrichment: false
+    # Опрос раз в 30 минут (2 раза в час): частые однотипные визиты с одного
+    # IP Qrator наказывает блоком на часы, даже с паузами и прогревом.
+    poll_interval_seconds: 1800
+    # Ходим через резидентные прокси из RU_PROXY_URLS (sticky: домен
+    # закреплён за одним IP — куки прогрева и TLS-сессия согласованы).
+    # Пустой пул = прямой запрос, поведение прежнее.
+    proxy_strategy: sticky
+    # Сервер отдаёт initial state с 12 заказами в inline-JSON; браузер не нужен
+    # (CDN kwork с части IP недоступен). robots.txt запрещает ?page=.
+    max_pages: 1
+    notes: "JSON initial state wantsListData; Qrator пропускает HTTP с TLS chrome131."
+  weblancer_net:
+    enabled: true
+    transport: http
+    listing_url: "https://www.weblancer.net/jobs/"
+    detail_enrichment: false
+    notes: "Cloudflare пропускает HTTP с TLS chrome131; /jobs/ редиректит на /freelance/."
+  freelancehunt_com:
+    enabled: true
+    transport: http
+    listing_url: "https://freelancehunt.com/projects"
+    detail_enrichment: false
+    impersonate: chrome131
+    notes: "Украинская биржа, бюджеты в UAH. chrome131 проходит Cloudflare; .RU — угнанный домен."
+  avito_ru:
+    enabled: true
+    transport: browser
+    listing_url: "https://www.avito.ru/all/predlozheniya_uslug"
+    detail_enrichment: false
+    # Qrator отдаёт 439/403 любым дата-центрам, включая relay. Без
+    # RU_PROXY_URLS адаптер сразу возвращает DISABLED, не тратя таймауты.
+    requires_proxy: true
+    notes: "Нужен российский резидентный прокси; без него площадка отключается сама."
+
+# Источники, которые намеренно не парсятся. Доказательства — в README.
+authenticated_only:
+  workzilla:
+    reason: "Лента заданий за логином; публичные страницы показывают только категории."
+  advego:
+    reason: "Список заказов требует аккаунта; /job/ редиректит на вход."
+  profi:
+    reason: "Публичной ленты заказов нет; клиентов подбирают специалистам после регистрации."
+  youdo:
+    reason: "Лента заказов требует аккаунта; публичные страницы — JS-оболочка."
+  yandex_services:
+    reason: "Публичной ленты заказов нет; маршрутизация запросов идёт в кабинете."
+  illustrators:
+    reason: "Маркетплейс работ, а не доска заказов."
+  frilanseri:
+    reason: "Публичного раздела проектов нет (404); сайт — лендинг."
+  headhub:
+    reason: "TLS-рукопожатие падает; домен не обслуживает рабочий сайт."
+  fiwork:
+    reason: "Только мобильное приложение RuStore; веб-листинга нет."
+  freeworker:
+    reason: "Только мобильное приложение RuStore; веб-листинга нет."
+
+scoring:
+  # Веса факторов нормализуются во время работы, поэтому их сумма не обязана быть 1.
+  weights:
+    budget: 0.28
+    skill_match: 0.22
+    client_quality: 0.18
+    competition: 0.14
+    freshness: 0.10
+    urgency_fit: 0.08
+  red_flag_penalty: 0.35             # умножается на суммарную severity красных флагов
+  skill_match:
+    # Свободный список навыков профиля для пересечения по ключевым словам.
+    skills:
+      - python
+      - парсинг
+      - скрапинг
+      - api
+      - интеграция
+      - автоматизация
+      - телеграм
+      - telegram
+      - бот
+      - django
+      - fastapi
+      - postgresql
+      - sql
+      - javascript
+      - typescript
+      - react
+      - вёрстка
+      - верстка
+      - docker
+      - llm
+      - gpt
+      - nlp
+    exclude_keywords:
+      - 1с
+      - "1c"
+      - бухгалтер
+      - копирайт
+      - статья
+      - рерайт
+      - обзвон
+      - холодные звонки
+      - оператор чата
+      - помощник
+      - ассистент
+      - hr
+      - менеджер
+      - маркетолог
+      - таргет
+      - таргетолог
+      - настройка каналов
+      - онлайн-продаж
+      - дизайн
+      - видеомонтаж
+      - монтаж
+      - транскрибац
+      - инфографик
+      - логотип
+      - партнёр
+      - книг
+      - комикс
+      - лидогенератор
+      - не разработчика
+      - не программиста
+      - опыт программирования не требуется
+  # Медианный бюджет проекта в рублях для нормировки «бюджет против рынка».
+  # Обновляйте раз в квартал; значения — консервативные медианы, не средние.
+  market_median_rub:
+    default: 8000
+    "Разработка и IT": 15000
+    "Дизайн": 6000
+    "Тексты и переводы": 2500
+    "SEO и трафик": 8000
+    "Соцсети и маркетинг": 6000
+    "Инженерия и Проектирование": 12000
+    "Архитектура и инжиниринг": 12000
+  # Модель ожидаемого бюджета для часовых и неизвестных бюджетов.
+  assumed_hours_default: 8
+  freshness_half_life_hours: 18
+  competition:
+    # score = 1 / (1 + proposals / k); k подобрано так, что 10 откликов ≈ 0.5
+    k: 10
+  client_quality:
+    hire_rate_weight: 0.5
+    spend_weight: 0.3
+    verification_weight: 0.2
+    spend_reference_rub: 100000
+
+red_flags:
+  enabled: true
+  rules:
+    unpaid_test:
+      enabled: true
+      severity: 0.8
+      patterns:
+        - "бесплатн\\w* (тестов|пробн)"
+        - "тестов\\w* задани\\w* бесплатн"
+        - "сделай\\w* (пробн|тестов)\\w* бесплатн"
+    offplatform_payment:
+      enabled: true
+      severity: 0.7
+      patterns:
+        - "без (безопасной сделки|эскроу|гаранта)"
+        - "перев\\w* (на карту|на сбер|на киви)"
+        - "оплата (после сдачи|по факту|после проверки)"
+    contact_before_hire:
+      enabled: true
+      severity: 0.4
+      patterns:
+        - "напиш\\w* (в )?(телеграм|whatsapp|ватсап|вк)"
+        - "скинь\\w* (резюме|портфолио) в (лс|телеграм)"
+        - "(телеграм|telegram|whatsapp|ватсап)\\s*[:@]"
+        - "t\\.me/"
+    scope_mismatch:
+      enabled: true
+      severity: 0.6
+      # Срабатывает, когда бюджет сильно ниже медианы рынка при большом объёме.
+      budget_ratio_below: 0.25
+      min_scope_chars: 600
+    vague_brief:
+      enabled: true
+      severity: 0.25
+      max_description_chars: 90
+    urgency_pressure:
+      enabled: true
+      severity: 0.3
+      patterns:
+        - "срочно.{0,20}(сегодня|за час|за 1 час|сейчас)"
+        - "нужно (было )?вчера"
+
+llm:
+  enabled: true
+  temperature: 0.4
+  max_output_tokens: 900
+  timeout_seconds: 60
+  # Если LLM недоступна, используется детерминированный русский fallback.
+  fallback_enabled: true
+  # Пусто — встроенный системный промпт. Непустая строка полностью заменяет его;
+  # extra_instructions дописываются в конец. Меняются командами /prompt.
+  system_prompt: ""
+  extra_instructions: ""
+  # Именованные OpenAI-совместимые провайдеры, добавленные командой
+  # /llm provider add. Ключи хранятся в .env под именами api_key_env.
+  active_provider: ""
+  providers: {}
+  style:
+    # Фразы, из-за которых текст выглядит машинным.
+    banned_phrases:
+      - "в современном мире"
+      - "как опытный"
+      - "я уверен, что"
+      - "надеюсь, это сообщение"
+      - "я являюсь экспертом"
+      - "динамично развивающ"
+      - "комплексное решение"
+      - "под ключ"
+      - "качественно и в срок"
+      - "быстро и качественно"
+    max_emoji: 1
+    max_exclamation: 1
+    min_specificity_overlap: 0.12       # доля ключевых слов заказа, повторённых в письме
+
+messaging:
+  # Консервативные лимиты; сверяйтесь с текущим интерфейсом каждой площадки.
+  limits:
+    fl_ru: { max_chars: 3000, allow_links: false }
+    kwork_ru: { max_chars: 1000, allow_links: false }
+    freelance_ru: { max_chars: 2000, allow_links: false }
+    freelancejob_ru: { max_chars: 2000, allow_links: false }
+    pchel_net: { max_chars: 3000, allow_links: false }
+    weblancer_net: { max_chars: 3000, allow_links: false }
+    freelancehunt_com: { max_chars: 2000, allow_links: false }
+    avito_ru: { max_chars: 1500, allow_links: false }
+  # Отправка под контролем: dry-run только логирует, live требует явного одобрения каждого письма.
+  require_human_approval: true
+  max_sends_per_hour: 6
+  min_seconds_between_sends: 240
+  # Сколько первых писем LLM может подготовить за цикл. Каждый заказ, прошедший
+  # фильтр категорий, всё равно попадает в Telegram; заказы сверх лимита
+  # приходят без готового письма.
+  max_messages_per_cycle: 50
+
+# Фильтр категорий: обрабатывать только заказы из выбранных категорий.
+# Когда включён, каждый собранный заказ классифицируется по таксономии Kwork
+# (7 верхних категорий: design, programming, writing_translations, seo,
+# promotion, audio_video, business) и фильтруется до скоринга.
+category_filter:
+  enabled: false                          # true, чтобы включить фильтр
+  categories: []                          # ["programming", "design"] или пусто — все
+  subcategories: {}                       # {"programming": ["Парсеры", "Чат-боты"]}
+  min_confidence: 0.35                    # 0.0..1.0, заказы ниже порога отбрасываются
+  unknown_policy: "exclude"               # "include" или "exclude" для неклассифицированных
+  # Минимальная цена в рублях: заказы дешевле не показываются. Заказы без
+  # цены («по договорённости») показываются всегда. 0 — фильтр выключен.
+  min_price_rub: 0

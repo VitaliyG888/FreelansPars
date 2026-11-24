@@ -1,0 +1,9 @@
+{
+  "platform": "fl_ru",
+  "url": "https://www.fl.ru/projects/",
+  "status": 200,
+  "bytes": 398492,
+  "server": "ddos-guard",
+  "content_type": "text/html; charset=UTF-8",
+  "set_cookie": "hidetopprjlenta=0; expires=Thu, 03-Dec-2026 00:13:04 GMT; Max-Age=2592000; path=/; domain=www.fl.ru; secure; HttpOnly"
+}

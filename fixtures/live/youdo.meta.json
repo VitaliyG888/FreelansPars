@@ -1,0 +1,9 @@
+{
+  "platform": "youdo",
+  "url": "https://youdo.com/",
+  "status": 200,
+  "bytes": 1767,
+  "server": "nginx",
+  "content_type": "text/html",
+  "set_cookie": ""
+}

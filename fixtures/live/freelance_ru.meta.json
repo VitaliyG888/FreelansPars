@@ -1,0 +1,9 @@
+{
+  "platform": "freelance_ru",
+  "url": "https://freelance.ru/project/search",
+  "status": 200,
+  "bytes": 103068,
+  "server": "ddos-guard",
+  "content_type": "text/html; charset=UTF-8",
+  "set_cookie": "_csrf=uaPVJxUra2FcRmW3TsPyStkUppThOqpQ; path=/; HttpOnly; SameSite=Lax"
+}

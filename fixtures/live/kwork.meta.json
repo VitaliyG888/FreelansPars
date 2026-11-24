@@ -1,0 +1,9 @@
+{
+  "platform": "kwork",
+  "url": "https://kwork.ru/projects",
+  "status": 200,
+  "bytes": 308103,
+  "server": "QRATOR",
+  "content_type": "text/html; charset=UTF-8",
+  "set_cookie": "RORSSQIHEK=77e3dfb4a7c79e771496c783e0897d56; expires=Fri, 06 Nov 2026 00:15:35 GMT; Max-Age=259200; path=/; secure; HttpOnly; SameSite=None"
+}

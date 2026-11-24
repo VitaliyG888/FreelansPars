@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freelance-bot"
+version = "0.4.0"
+description = "Russian freelance marketplace aggregator, scorer and outreach assistant"
+requires-python = ">=3.11"
+dependencies = [
+    "curl_cffi>=0.7.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "PyYAML>=6.0",
+    "typer>=0.12",
+    "rich>=13.7",
+    "tenacity>=8.3",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.2",
+    "python-telegram-bot>=21.0",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.45"]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+freelance-bot = "freelance_bot.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "C4", "SIM"]
+ignore = ["S101", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S311"]
+# Telegram UI strings are long by nature; breaking them hides the rendered text.
+"src/freelance_bot/telegram_settings.py" = ["E501"]
+# Jitter uses the non-cryptographic RNG on purpose; browser cleanup is best-effort.
+"src/freelance_bot/net/*" = ["S311"]
+"src/freelance_bot/net/browser.py" = ["S110", "S112", "SIM105"]
+"src/freelance_bot/llm/prompts.py" = ["E501"]
+"src/freelance_bot/cli_support.py" = ["E501"]
+# Generated one-line data tables: readable in the harness, not in ruff's 100-char view.
+"src/freelance_bot/skills/*_packs.py" = ["E501", "I001"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+ignore_missing_imports = true
+packages = ["freelance_bot"]

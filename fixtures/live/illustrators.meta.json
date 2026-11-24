@@ -1,0 +1,9 @@
+{
+  "platform": "illustrators",
+  "url": "https://illustrators.ru/",
+  "status": 200,
+  "bytes": 221182,
+  "server": "nginx/1.22.1",
+  "content_type": "text/html; charset=utf-8",
+  "set_cookie": "_illustrators_session=YlJMV0xXUVJOUFVVMGlLcEordmljVU5NWmhwd1Q0U1pZM2ppNnFWL0djN3lONGdhTHJobjZhWDNFNWVIMUxOa3R5cjJBYXlaQWs5V2doK05jMStVQzQxTmsvVlhPUmJQOWsrRk53MEd4UmZvVnkxd0RucEZCSFAyWTBrMDFGTDh4N3VEbW5NZFhTUEx1eW1kUUJWNjdnPT0tLXhiLy91RTZIQ1d5NEhFWXRVMmJ4QkE9PQ%3D%3D--3d7ea88f0c92186dbc796bf5bb06b51fcc6c06f4; path=/; HttpOnly"
+}

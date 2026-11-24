@@ -1,0 +1,9 @@
+{
+  "platform": "workzilla",
+  "url": "https://work-zilla.com/freelancer",
+  "status": 200,
+  "bytes": 190645,
+  "server": "nginx/1.18.0 (Ubuntu)",
+  "content_type": "text/html; charset=utf-8",
+  "set_cookie": "anon_id=563247c5-1d4c-4d0e-9861-ff12390d607c; Path=/; Expires=Wed, 03 Nov 2027 00:15:40 GMT; Max-Age=31536000; HttpOnly"
+}
