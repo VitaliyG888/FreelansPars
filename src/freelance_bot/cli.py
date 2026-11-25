@@ -17,6 +17,7 @@ from rich.table import Table
 
 from . import __version__
 from .adapters.registry import ADAPTERS
+from .categories import CategoryFilter
 
 # Команды категорий определены в cli_categories.py, но регистрируются здесь.
 from .cli_categories import categories_cmd, classify_cmd  # noqa: F401
@@ -177,6 +178,43 @@ def score(
     engine = ScoringEngine(config.scoring, config.red_flags)
     ranked = engine.rank(jobs, top_n=top)
     console.print(format_scored_table(ranked))
+
+
+@app.command()
+def reclassify(
+    limit: Annotated[int, typer.Option("--limit", help="0 — все заказы")] = 0,
+) -> None:
+    """Пересчитывает рубрики сохранённых заказов по текущему классификатору.
+
+    После правок классификации старые записи хранят прежний результат, и
+    заказы без рубрики не попадают в /jobs и доставку. Команда заново
+    классифицирует payload и обновляет признак «подходящий» по общему
+    фильтру категорий из config.yaml.
+    """
+    _setup_logging(False)
+    config = get_config()
+    store = JobStore(get_secrets().freelance_bot_db)
+    try:
+        cat_cfg = config.category_filter
+        cat_filter = CategoryFilter(
+            enabled=cat_cfg.enabled,
+            categories=tuple(cat_cfg.categories),
+            subcategories={
+                k: tuple(v) for k, v in (cat_cfg.subcategories or {}).items()
+            }
+            if cat_cfg.subcategories
+            else None,
+            min_confidence=cat_cfg.min_confidence,
+            unknown_policy=cat_cfg.unknown_policy,
+            min_price_rub=cat_cfg.min_price_rub,
+        )
+        stats = store.reclassify_jobs(limit=limit, cat_filter=cat_filter)
+    finally:
+        store.close()
+    console.print(
+        f"проверено: {stats['checked']} · с рубрикой: {stats['classified']} · "
+        f"без рубрики: {stats['unknown']} · подходящих: {stats['eligible']}"
+    )
 
 
 @app.command()

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import pytest
+
 from freelance_bot.categories import (
     CATEGORIES,
     CategoryFilter,
     classify_job,
+    expand_subcategory_selection,
     find_category,
 )
 from freelance_bot.models import Job
+from freelance_bot.text import contains_term
 
 
 def make_job(title: str, description: str = "", category: str | None = None) -> Job:
@@ -244,6 +248,119 @@ def test_categories_cmd_callable() -> None:
 
     # Смоук-тест: не падает
     assert callable(categories_cmd)
+
+
+# --------------------------------------------------------------------------- #
+# Словоформы и «семья» сайтовых работ
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "term"),
+    [
+        ("Создание сайта", "сайт"),
+        ("создание сайтов", "сайт"),
+        ("сайтами", "сайт"),
+        ("Ищу дизайнера", "дизайн"),
+        ("дизайнеров", "дизайн"),
+        ("Вёрстка по макету", "верстка"),
+        ("вёрстки", "верстка"),
+        ("Разработка Telegram-бота", "бот"),
+        ("лендинги", "лендинг"),
+    ],
+)
+def test_contains_term_matches_russian_word_forms(text: str, term: str) -> None:
+    """Падежи коротких слов совпадают: иначе заказы теряли рубрику."""
+    assert contains_term(text, term)
+
+
+@pytest.mark.parametrize(
+    ("text", "term"),
+    [
+        ("работа", "бот"),
+        ("обработка", "бот"),
+        ("тесный", "тест"),
+        ("Отпариватель", "сайт"),
+    ],
+)
+def test_contains_term_keeps_word_boundaries(text: str, term: str) -> None:
+    """Границы слова остаются: «бот» не должен совпадать с «работа»."""
+    assert not contains_term(text, term)
+
+
+def test_classify_site_creation_job() -> None:
+    """«Создание сайта» — программирование, а не пустая рубрика.
+
+    Раньше слово «сайт» не совпадало с «сайта», заказ оставался без
+    категории и не доходил до подписчиков.
+    """
+    result = classify_job(make_job("Создание сайта", "Нужен сайт под ключ"))
+    assert result.category_key == "programming"
+
+
+def test_classify_site_creation_variants() -> None:
+    for title in (
+        "Создание сайта на тильде",
+        "Редизайн сайта под ключ",
+        "Создание простого сайта для бренда очков",
+        "Створення сайту з нуля",
+    ):
+        assert classify_job(make_job(title)).category_key == "programming", title
+
+
+def test_designer_word_form_classifies_as_design() -> None:
+    """«Ищу дизайнера» попадает в дизайн: словоформа больше не теряется."""
+    result = classify_job(make_job("Ищу дизайнера"))
+    assert result.category_key == "design"
+
+
+def test_site_work_family_expands_subcategory_selection() -> None:
+    """Выбор верстки включает создание и доработку сайта.
+
+    Для заказчика это одна работа: если пользователь выбрал веб-верстку,
+    заказы «создание сайта» тоже должны приходить.
+    """
+    expanded = expand_subcategory_selection("programming", ["Верстка по макету"])
+    for name in (
+        "верстка по макету",
+        "новый сайт",
+        "копия сайта",
+        "доработка сайта",
+        "настройка сайта",
+    ):
+        assert name in expanded, name
+
+
+def test_site_work_family_does_not_touch_other_subcategories() -> None:
+    """Расширение ограничено сайтовой семьёй: парсеры не подмешиваются."""
+    expanded = expand_subcategory_selection("programming", ["Парсеры"])
+    assert expanded == {"парсеры"}
+
+
+def test_filter_keeps_job_without_leaf_category() -> None:
+    """Заказ без определённого листа не отбрасывается, если рубрика выбрана."""
+    flt = CategoryFilter(
+        enabled=True,
+        categories=("programming",),
+        subcategories={"programming": ("Парсеры",)},
+    )
+    result = classify_job(make_job("Создание сайта"))
+    assert result.category_key == "programming"
+    assert result.subcategory is None
+    assert flt.allows(result)
+
+
+def test_filter_still_rejects_wrong_subcategory() -> None:
+    """Сужение работает: заказ с чужой подкатегорией по-прежнему отбрасывается."""
+    flt = CategoryFilter(
+        enabled=True,
+        categories=("programming",),
+        subcategories={"programming": ("Парсеры",)},
+    )
+    result = classify_job(make_job("Разработка на 1С", "Доработка конфигурации"))
+    assert result.category_key == "programming"
+    assert result.subcategory == "1С"
+    assert not flt.allows(result)
 
 
 def test_classify_cmd_callable() -> None:

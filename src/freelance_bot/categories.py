@@ -117,6 +117,33 @@ def find_category(name: str) -> Category | None:
     return None
 
 
+def expand_subcategory_selection(
+    category_key: str, wanted: tuple[str, ...] | list[str]
+) -> set[str]:
+    """Расширяет выбор пользователя до родственных категорий.
+
+    Заказчик мыслит работами, а не листьями таксономии: «нужен сайт» — это
+    и верстка, и создание сайта, и его доработка. Если пользователь выбрал
+    любую категорию из семьи сайтовых работ, выбор дополняется остальными
+    членами семьи. Иначе «выбрана веб-верстка» молча теряла «создание сайта».
+    """
+    needles = {normalise(item) for item in wanted}
+    category = CATEGORY_BY_KEY.get(category_key)
+    if category is None:
+        return needles
+    for group in category.groups:
+        if group.name not in SITE_WORK_GROUPS:
+            continue
+        if needles & {normalise(item.name) for item in group.items}:
+            # Выбрана хотя бы одна категория семьи — добавляем всю семью.
+            for family_group in category.groups:
+                if family_group.name in SITE_WORK_GROUPS:
+                    needles.update(normalise(item.name) for item in family_group.items)
+                    needles.add(normalise(family_group.name))
+            break
+    return needles
+
+
 # --------------------------------------------------------------------------- #
 # Синонимы
 # --------------------------------------------------------------------------- #
@@ -401,6 +428,14 @@ EXTRA_KEYWORDS: dict[str, tuple[str, ...]] = {
 # Названия листьев слишком общие, чтобы быть ключевыми словами классификации.
 GENERIC_TERMS: frozenset[str] = frozenset({"другие", "74 языка"})
 
+#: Группы «сайтовой» работы в рубрике «Разработка и IT». Заказчик не различает
+#: верстку, создание сайта и его доработку: для него это одна работа. Поэтому
+#: выбор любой категории из этой семьи включает всю семью — иначе «выбрана
+#: веб-верстка» молча теряет заказы «создание сайта».
+SITE_WORK_GROUPS: frozenset[str] = frozenset(
+    {"Доработка и настройка сайта", "Создание сайтов", "Верстка"}
+)
+
 # Вес ключевого слова в зависимости от места находки.
 FIELD_WEIGHTS: dict[str, float] = {"title": 3.0, "meta": 2.5, "description": 1.0}
 WEIGHT_GROUP = 0.8
@@ -574,10 +609,17 @@ class CategoryFilter:
         wanted = (self.subcategories or {}).get(classification.category_key)
         if not wanted:
             return True
-        needles = {normalise(item) for item in wanted}
+
+        needles = expand_subcategory_selection(classification.category_key, wanted)
         if classification.subcategory and normalise(classification.subcategory) in needles:
             return True
-        return bool(classification.group and normalise(classification.group) in needles)
+        if classification.group and normalise(classification.group) in needles:
+            return True
+        # Лист не определён: заказ явно попал в выбранную рубрику, но
+        # классификатор не нашёл конкретную подкатегорию. Отбрасывать его
+        # нельзя — так терялись «Создание сайта», «Разработка Telegram-бота»
+        # и другие заказы без точного листа.
+        return not classification.subcategory and not classification.group
 
     def describe(self) -> str:
         if not self.enabled:

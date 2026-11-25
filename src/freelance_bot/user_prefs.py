@@ -99,6 +99,10 @@ class UserFilterPrefs:
         Если для рубрики выбраны подкатегории, заказ проходит, когда его
         подкатегория или группа входят в выбор. Категория без подкатегорий
         в выборе означает «вся рубрика».
+
+        Лист может быть не определён: «Создание сайта» классифицируется в
+        рубрику без конкретной подкатегории. Такой заказ пропускается —
+        иначе он молча терялся бы, хотя рубрика выбрана.
         """
         if not self.categories:
             return True
@@ -109,10 +113,16 @@ class UserFilterPrefs:
         wanted = self.subcategories.get(category_key) or []
         if not wanted:
             return True
-        needles = {item.casefold() for item in wanted}
+        from .categories import expand_subcategory_selection
+
+        # Выбор расширяется внутри семьи сайтовых работ: верстка, создание
+        # сайта и его доработка — одна работа для заказчика.
+        needles = expand_subcategory_selection(category_key, wanted)
         if subcategory and subcategory.casefold() in needles:
             return True
-        return bool(group and group.casefold() in needles)
+        if group and group.casefold() in needles:
+            return True
+        return not subcategory and not group
 
     def matches(
         self,

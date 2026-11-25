@@ -14,7 +14,7 @@ from .models import GeneratedMessage, Job, OrderStatus, ScoredJob
 from .order_links import resolve_order_url
 
 if TYPE_CHECKING:
-    from .categories import Classification
+    from .categories import CategoryFilter, Classification
     from .user_prefs import UserFilterPrefs
 
 #: Разрешённые переходы статусов карточки. Повторный callback идемпотентен:
@@ -605,6 +605,69 @@ class JobStore:
             classification=classification,
         )
 
+    def reclassify_jobs(
+        self, *, limit: int = 0, cat_filter: CategoryFilter | None = None
+    ) -> dict[str, int]:
+        """Пересчитывает рубрику у сохранённых заказов.
+
+        Нужно после правок классификатора: старые записи хранят результат
+        прошлой версии, поэтому заказы, которые раньше оставались без рубрики
+        («Создание сайта»), не попадали в /jobs и в доставку. Метод читает
+        сохранённый payload, заново классифицирует и обновляет рубрику,
+        группу, подкатегорию и — если передан ``cat_filter`` — признак
+        ``eligible`` по общему фильтру категорий и цены.
+
+        Без ``cat_filter`` признак ``eligible`` не трогается: решение о показе
+        остаётся за конвейером.
+
+        ``limit`` > 0 ограничивает число обрабатываемых записей.
+
+        Возвращает счётчики: сколько проверено, сколько получило рубрику,
+        сколько осталось без неё и сколько стало подходящим.
+        """
+        from .categories import classify_job
+        from .models import Job
+
+        with self._lock:
+            query = "SELECT uid, payload, eligible FROM jobs ORDER BY last_seen DESC"
+            if limit > 0:
+                query += f" LIMIT {int(limit)}"
+            rows = self._conn.execute(query).fetchall()
+
+        checked = classified = unknown = eligible_now = 0
+        for row in rows:
+            checked += 1
+            try:
+                job = Job.model_validate_json(row["payload"])
+            except Exception:  # noqa: BLE001 - битый payload не должен ломать проход
+                unknown += 1
+                continue
+            result = classify_job(job)
+            if result.category_key is None:
+                unknown += 1
+            else:
+                classified += 1
+            fields: list[object] = [result.category_key, result.group, result.subcategory]
+            sql = "UPDATE jobs SET category_key = ?, category_group = ?, subcategory = ?"
+            if cat_filter is not None:
+                allowed = cat_filter.allows(result) and cat_filter.allows_price(job)
+                if allowed:
+                    eligible_now += 1
+                sql += ", eligible = ?"
+                fields.append(int(allowed))
+            sql += " WHERE uid = ?"
+            fields.append(row["uid"])
+            with self._lock:
+                self._conn.execute(sql, tuple(fields))
+        with self._lock:
+            self._conn.commit()
+        return {
+            "checked": checked,
+            "classified": classified,
+            "unknown": unknown,
+            "eligible": eligible_now,
+        }
+
     def top_recent(self, limit: int = 20) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
@@ -722,12 +785,18 @@ class JobStore:
         return {int(row["chat_id"]): UserFilterPrefs.from_row(dict(row)) for row in rows}
 
     def user_jobs(
-        self, prefs: UserFilterPrefs, limit: int = 10
+        self, prefs: UserFilterPrefs, limit: int = 10, platform: str | None = None
     ) -> tuple[list[dict], int]:
         """Последние заказы по фильтрам пользователя.
 
         Приоритет выдачи: без штрафа — первыми, заказы со штрафом красных
         флагов — последними; внутри каждой группы свежие выше старых.
+
+        ``platform`` ограничивает выдачу одной биржей и перекрывает личный
+        фильтр по площадкам: пользователь выбрал её явно в /jobs, поэтому
+        показываем именно её заказы. Остальные фильтры (рубрики, цена)
+        продолжают действовать.
+
         Возвращает (список карточек, всего подходящих).
         """
         from .user_prefs import UserFilterPrefs
@@ -747,15 +816,47 @@ class JobStore:
         matched = [
             dict(row)
             for row in rows
-            if prefs.matches(
-                platform=row["platform"],
-                category_key=row["category_key"],
-                subcategory=row["subcategory"],
-                group=row["category_group"],
-                budget_rub_estimate=row["budget_rub"],
-            )
+            if self._user_row_matches(prefs, row, platform)
         ]
         return matched[:limit], len(matched)
+
+    @staticmethod
+    def _user_row_matches(prefs: UserFilterPrefs, row: dict, platform: str | None) -> bool:
+        """Проверяет строку заказа по фильтрам пользователя.
+
+        Явно выбранная биржа (``platform``) заменяет личный фильтр площадок,
+        остальные условия остаются общими для /jobs и доставки.
+        """
+        if platform is not None:
+            if row["platform"] != platform:
+                return False
+        elif not prefs.allows_platform(row["platform"]):
+            return False
+        return prefs.allows_category(
+            row["category_key"],
+            subcategory=row["subcategory"],
+            group=row["category_group"],
+        ) and prefs.allows_price(row["budget_rub"])
+
+    def user_platform_counts(self, prefs: UserFilterPrefs) -> dict[str, int]:
+        """Сколько подходящих заказов есть на каждой бирже.
+
+        Нужно для меню /jobs: пользователь видит, с какой биржи что придёт,
+        и не открывает пустой список. Личный фильтр площадок здесь не
+        применяется — меню предлагает все биржи, где есть заказы.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT platform, budget_rub, category_key, category_group, subcategory"
+                " FROM jobs WHERE eligible = 1"
+            ).fetchall()
+        counts: dict[str, int] = {}
+        for row in rows:
+            if not self._user_row_matches(prefs, row, None):
+                continue
+            name = str(row["platform"])
+            counts[name] = counts.get(name, 0) + 1
+        return counts
 
     # ------------------------------------------------------------------ избранное
     def add_favorite(self, user_id: int, job_uid: str) -> bool:

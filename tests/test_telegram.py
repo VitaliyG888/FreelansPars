@@ -323,13 +323,16 @@ class FakeStore:
     def all_user_filters(self) -> dict[int, UserFilterPrefs]:
         return dict(self.filters)
 
-    def user_jobs(self, prefs: UserFilterPrefs, limit: int = 10) -> tuple[list[dict], int]:
+    def user_jobs(
+        self, prefs: UserFilterPrefs, limit: int = 10, platform: str | None = None
+    ) -> tuple[list[dict], int]:
         """Возвращает заранее положенные строки, отфильтрованные по prefs."""
         rows = getattr(self, "user_job_rows", [])
         matched = [
             row
             for row in rows
-            if prefs.matches(
+            if (platform is None or row["platform"] == platform)
+            and prefs.matches(
                 platform=row["platform"],
                 category_key=row["category_key"],
                 subcategory=row["subcategory"],
@@ -338,6 +341,23 @@ class FakeStore:
             )
         ]
         return matched[:limit], len(matched)
+
+    def user_platform_counts(self, prefs: UserFilterPrefs) -> dict[str, int]:
+        """Счётчики заказов по биржам для меню /jobs."""
+        rows = getattr(self, "user_job_rows", [])
+        counts: dict[str, int] = {}
+        for row in rows:
+            if not prefs.matches(
+                platform=row["platform"],
+                category_key=row["category_key"],
+                subcategory=row["subcategory"],
+                group=row["category_group"],
+                budget_rub_estimate=row["budget_rub"],
+            ):
+                continue
+            name = str(row["platform"])
+            counts[name] = counts.get(name, 0) + 1
+        return counts
 
     def add_favorite(self, user_id: int, job_uid: str) -> bool:
         favs = self.fav_map.setdefault(user_id, set())
@@ -1787,7 +1807,37 @@ async def test_stats_without_store_uses_zero_counters() -> None:
 
 
 @pytest.mark.asyncio
-async def test_jobs_lists_eligible_with_show_status(tmp_path) -> None:
+async def test_jobs_asks_platform_first(tmp_path) -> None:
+    """/jobs сперва спрашивает биржу и показывает счётчики по ней."""
+    store = JobStore(tmp_path / "jobs.db")
+    try:
+        first = scored_job(title="Первый заказ", external_id="1")
+        second = scored_job(title="Второй заказ", external_id="2")
+        store.save_scored(first, eligible=True)
+        store.save_scored(second, eligible=True)
+
+        controller = build_controller(store=store)
+        update = FakeUpdate()
+
+        await controller._cmd_jobs(update, ctx("5"))
+
+        text, kwargs = update.message.replies[0]
+        assert "Последние заказы" in text
+        assert "Выберите биржу" in text
+        assert "Всего подходящих: 2" in text
+        assert kwargs["parse_mode"] == "HTML"
+        # В меню выбора нет кнопок избранного — только биржи.
+        buttons = [btn for row in kwargs["reply_markup"].inline_keyboard for btn in row]
+        assert buttons, "должны быть кнопки бирж"
+        assert all(btn.callback_data.startswith("jobs:") for btn in buttons)
+        assert not any(str(btn.callback_data).startswith("fav:") for btn in buttons)
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_jobs_platform_list_shows_only_that_platform(tmp_path) -> None:
+    """После выбора биржи список содержит заказы только с неё."""
     store = JobStore(tmp_path / "jobs.db")
     try:
         shown = scored_job(title="Первый заказ", external_id="1")
@@ -1797,20 +1847,79 @@ async def test_jobs_lists_eligible_with_show_status(tmp_path) -> None:
         store.mark_notified(shown.job.uid)
 
         controller = build_controller(store=store)
-        update = FakeUpdate()
+        update = FakeUpdate(callback="jobs:5:fl_ru", with_message=False)
 
-        await controller._cmd_jobs(update, ctx("5"))
+        await controller._handle_callback(update, ctx())
 
-        text, kwargs = update.message.replies[0]
-        assert "Последние заказы по вашим фильтрам" in text
+        text, kwargs = update.callback_query.edits[0]
+        assert "FL.ru" in text
         assert "Первый заказ" in text and "Второй заказ" in text
         assert "✅ показан" in text and "🆕 новый" in text
         assert "https://example.test/1" in text
         assert kwargs["parse_mode"] == "HTML"
-        # Каждый заказ снабжён кнопкой избранного.
-        markup = kwargs["reply_markup"]
-        buttons = [btn.callback_data for row in markup.inline_keyboard for btn in row]
-        assert any(str(data).startswith("fav:") for data in buttons)
+        # Кнопок избранного в списке нет: только возврат к выбору биржи.
+        buttons = [btn for row in kwargs["reply_markup"].inline_keyboard for btn in row]
+        assert [btn.callback_data for btn in buttons] == ["jobs_menu:5"]
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_jobs_platform_list_filters_by_platform(tmp_path) -> None:
+    """Биржи не смешиваются: заказ другой площадки в список не попадает."""
+    store = JobStore(tmp_path / "jobs.db")
+    try:
+        fl_job = scored_job(title="Заказ с fl_ru", external_id="1")
+        store.save_scored(fl_job, eligible=True)
+        # Второй заказ с другой площадки.
+        kwork_job = scored_job(title="Заказ с kwork", external_id="2")
+        kwork_job.job.platform = "kwork_ru"
+        store.save_scored(kwork_job, eligible=True)
+
+        controller = build_controller(store=store)
+        update = FakeUpdate(callback="jobs:5:fl_ru", with_message=False)
+
+        await controller._handle_callback(update, ctx())
+
+        text = update.callback_query.edits[0][0]
+        assert "Заказ с fl_ru" in text
+        assert "Заказ с kwork" not in text
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_jobs_empty_platform_reports_no_jobs(tmp_path) -> None:
+    """Пустая биржа отвечает понятной фразой, а не пустым списком."""
+    store = JobStore(tmp_path / "jobs.db")
+    try:
+        controller = build_controller(store=store)
+        update = FakeUpdate(callback="jobs:5:kwork_ru", with_message=False)
+
+        await controller._handle_callback(update, ctx())
+
+        text = update.callback_query.edits[0][0]
+        assert "подходящих" in text
+        assert "пока нет" in text
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_jobs_menu_returns_to_platform_choice(tmp_path) -> None:
+    """Кнопка «Другая биржа» возвращает к выбору площадки."""
+    store = JobStore(tmp_path / "jobs.db")
+    try:
+        store.save_scored(scored_job(title="Заказ", external_id="1"), eligible=True)
+        controller = build_controller(store=store)
+        update = FakeUpdate(callback="jobs_menu:5", with_message=False)
+
+        await controller._handle_callback(update, ctx())
+
+        text, kwargs = update.callback_query.edits[0]
+        assert "Выберите биржу" in text
+        buttons = [btn for row in kwargs["reply_markup"].inline_keyboard for btn in row]
+        assert any(btn.callback_data.startswith("jobs:") for btn in buttons)
     finally:
         store.close()
 
@@ -1891,7 +2000,7 @@ async def test_help_describes_every_command() -> None:
     text = "".join(reply for reply, _ in update.message.replies)
     assert "Справка по командам" in text
     assert "/jobs [5|10|30]" in text
-    assert "Последние заказы по вашим фильтрам" in text
+    assert "Последние заказы: сперва выбор биржи" in text
     assert "/help команда" in text
     # /menu и /help остаются синхронными: описание есть у каждой команды.
     for item in COMMAND_HELP:

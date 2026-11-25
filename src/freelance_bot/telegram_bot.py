@@ -7,8 +7,8 @@
 - Порогов балла и совпадения навыков нет: показывается всё, что прошло
   фильтры; штраф красных флагов и свежесть задаются только администратором
   и влияют лишь на порядок (штрафные и старые заказы — последними)
-- Пользователь запрашивает последние 5/10/30 заказов (/jobs) и помечает
-  понравившиеся (/favorites, кнопка ♥ на карточке)
+- Пользователь запрашивает последние 5/10/30 заказов (/jobs) с выбранной биржи
+  и помечает понравившиеся (/favorites, кнопка ♥ на карточке)
 
 Команды пользователя:
 
@@ -17,7 +17,7 @@
 /help [команда] - справка по всем командам или подробно по одной
 /status         - текущий статус конвейера (работает/остановлен, статистика)
 /filters        - личные фильтры: категории, подкатегории, биржи, мин. цена
-/jobs [5|10|30] - последние заказы по вашим фильтрам
+/jobs [5|10|30] - последние заказы с выбранной биржи
 /favorites      - избранные заказы (кнопка ♥ на карточке)
 /stats          - статистика (собрано заказов, отправлено сообщений)
 
@@ -207,7 +207,7 @@ COMMAND_HELP: tuple[CommandHelp, ...] = (
     CommandHelp(
         "jobs",
         "/jobs [5|10|30]",
-        "Последние заказы по вашим фильтрам: свежие первыми, со штрафами — в конце.",
+        "Последние заказы: сперва выбор биржи, затем список только с неё.",
         "Мониторинг",
         ("/jobs", "/jobs 30"),
     ),
@@ -930,7 +930,7 @@ class TelegramBotController(
             "показывается всё, что прошло фильтр.",
             "",
             "*Мои заказы:*",
-            "/jobs — последние 5/10/30 заказов по вашим фильтрам",
+            "/jobs — последние 5/10/30 заказов: сперва выбор биржи",
             "/favorites — избранные заказы (♥ на карточке)",
             "/status — статус и последний цикл",
             "/stats — статистика за 7 дней",
@@ -1498,8 +1498,16 @@ class TelegramBotController(
     # Допустимые размеры выборки для /jobs — только 5, 10 или 30.
     JOB_LIMITS: tuple[int, ...] = (5, 10, 30)
 
+    #: Сколько бирж показывать кнопками в меню /jobs. Обычно их семь, но
+    #: список растёт с конфигом, поэтому ряды укладываются по две кнопки.
+    JOBS_PLATFORMS_PER_ROW = 2
+
     async def _cmd_jobs(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обрабатывает /jobs [5|10|30]: последние заказы по личным фильтрам.
+        """Обрабатывает /jobs [5|10|30]: заказы по личным фильтрам.
+
+        Сперва бот предлагает выбрать биржу, и только потом показывает
+        список — ровно с этой биржи. Так выдача не смешивает площадки,
+        у которых разный формат и срок жизни заказов.
 
         Приоритет выдачи: свежие без штрафов — первыми, заказы со штрафом
         красных флагов и старые — последними (приоритет задаёт админ).
@@ -1537,59 +1545,147 @@ class TelegramBotController(
 
         try:
             prefs = self.store.get_user_filters(chat_id)
-            jobs, total = self.store.user_jobs(prefs, limit)
+            counts = self.store.user_platform_counts(prefs)
         except Exception:  # noqa: BLE001 - команда не должна ломать бота
-            log.exception("Failed to query user jobs")
+            log.exception("Failed to query user job platforms")
             await update.message.reply_text("⚠️ Не удалось прочитать базу заказов.")
             return
 
-        if not jobs:
+        if not counts:
             await update.message.reply_text(
                 "🎯 Подходящих по вашим фильтрам заказов пока нет. "
                 "Список появится после ближайшего прохода."
             )
             return
 
+        text, markup = self._jobs_platform_view(counts, limit)
+        await self._reply(update, text, parse_mode="HTML", reply_markup=markup)
+
+    def _jobs_platform_view(
+        self, counts: dict[str, int], limit: int
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        """Карточка выбора биржи для /jobs: счётчики и кнопки площадок."""
+        from .card_render import platform_label
+
+        total = sum(counts.values())
         lines = [
-            "🎯 <b>Последние заказы по вашим фильтрам</b>",
+            "🎯 <b>Последние заказы</b>",
+            f"Всего подходящих: {total} · показано будет до {limit}",
+            "",
+            "Выберите биржу — покажу заказы только с неё:",
+            "",
+        ]
+        ordered = sorted(
+            counts.items(), key=lambda item: (-item[1], platform_label(item[0]))
+        )
+        for name, count in ordered:
+            lines.append(f"• {html_escape(platform_label(name), quote=False)} — {count}")
+
+        buttons = [
+            InlineKeyboardButton(
+                f"{platform_label(name)} · {count}",
+                callback_data=f"jobs:{limit}:{name}",
+            )
+            for name, _count in ordered
+        ]
+        rows = [
+            buttons[index : index + self.JOBS_PLATFORMS_PER_ROW]
+            for index in range(0, len(buttons), self.JOBS_PLATFORMS_PER_ROW)
+        ]
+        return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+    async def _jobs_platform_list(
+        self, update: Update, query: CallbackQuery, limit: int, platform: str
+    ) -> None:
+        """Показывает заказы выбранной биржи (кнопки из /jobs).
+
+        Кнопок избранного здесь нет намеренно: это просмотр списка, а не
+        разбор карточки. Понравившийся заказ отмечают в самой карточке,
+        где кнопка ♥ не мешает читать выдачу.
+        """
+        chat = update.effective_chat
+        if self.store is None or chat is None:
+            await query.answer("🗄️ База заказов недоступна.", show_alert=True)
+            return
+
+        from .card_render import platform_label
+
+        if limit not in self.JOB_LIMITS:
+            limit = 10
+        label = platform_label(platform)
+        try:
+            prefs = self.store.get_user_filters(chat.id)
+            jobs, total = self.store.user_jobs(prefs, limit, platform=platform)
+        except Exception:  # noqa: BLE001 - кнопка не должна ломать бота
+            log.exception("Failed to query user jobs for platform %s", platform)
+            await query.answer("⚠️ Не удалось прочитать базу заказов.", show_alert=True)
+            return
+
+        if not jobs:
+            await query.edit_message_text(
+                f"🎯 На бирже {html_escape(label, quote=False)} подходящих "
+                "по вашим фильтрам заказов пока нет."
+            )
+            return
+
+        lines = [
+            f"🎯 <b>{html_escape(label, quote=False)}</b> — последние заказы",
             f"Всего подходящих: {total} · показаны {len(jobs)}",
             "",
         ]
-        keyboard_rows: list[list[InlineKeyboardButton]] = []
         for index, row in enumerate(jobs, start=1):
             title = html_escape(str(row["title"]), quote=False)
             url = html_escape(str(row["order_url"] or row["url"]), quote=True)
-            platform = html_escape(str(row["platform"]), quote=False)
             status = "✅ показан" if row["notified_at"] else "🆕 новый"
             score = float(row["score"] or 0)
             penalty = float(row["penalty"] or 0)
             lines.append(f'{index}. <a href="{url}">{title}</a>')
-            meta = f"   ⭐ {score:.1f} · {platform} · {status}"
+            meta = f"   ⭐ {score:.1f} · {status}"
             if penalty > 0:
                 meta += " · ⚠️ штраф"
             budget = _format_budget(row["budget_rub"])
             if budget:
                 meta += f" · {budget}"
             lines.append(meta)
-            # Кнопка избранного под каждым заказом.
-            keyboard_rows.append(
-                [
-                    InlineKeyboardButton(
-                        "💔 Убрать из избранного"
-                        if self.store.is_favorite(chat_id, str(row["uid"]))
-                        else "♥ Выделить как понравившееся",
-                        callback_data=(
-                            f"unfav:{row['uid']}"
-                            if self.store.is_favorite(chat_id, str(row["uid"]))
-                            else f"fav:{row['uid']}"
-                        ),
-                    )
-                ]
-            )
             lines.append("")
 
-        keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
-        await self._reply(update, "\n".join(lines), parse_mode="HTML", reply_markup=keyboard)
+        # Возврат к выбору биржи: пользователь часто смотрит несколько.
+        back = [[InlineKeyboardButton("⬅ Другая биржа", callback_data=f"jobs_menu:{limit}")]]
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(back),
+            disable_web_page_preview=True,
+        )
+
+    async def _jobs_back_to_menu(
+        self, update: Update, query: CallbackQuery, data: str
+    ) -> None:
+        """Возвращает к выбору биржи из списка заказов (кнопка «Другая биржа»)."""
+        chat = update.effective_chat
+        if self.store is None or chat is None:
+            await query.answer("🗄️ База заказов недоступна.", show_alert=True)
+            return
+        try:
+            limit = int(data.split(":", 1)[1])
+        except (IndexError, ValueError):
+            limit = 10
+        if limit not in self.JOB_LIMITS:
+            limit = 10
+        try:
+            prefs = self.store.get_user_filters(chat.id)
+            counts = self.store.user_platform_counts(prefs)
+        except Exception:  # noqa: BLE001 - кнопка не должна ломать бота
+            log.exception("Failed to query user job platforms")
+            await query.answer("⚠️ Не удалось прочитать базу заказов.", show_alert=True)
+            return
+        if not counts:
+            await query.edit_message_text(
+                "🎯 Подходящих по вашим фильтрам заказов пока нет."
+            )
+            return
+        text, markup = self._jobs_platform_view(counts, limit)
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
 
     async def _cmd_favorites(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обрабатывает /favorites: избранные заказы пользователя."""
@@ -2095,6 +2191,19 @@ class TelegramBotController(
             if not handled:
                 # Префикс знакомый, хвост нет — понятная ошибка вместо «unknown».
                 await query.answer("Неизвестное действие личных фильтров.", show_alert=True)
+
+        # ------------------------------------------------------- выбор биржи в /jobs
+        elif data.startswith("jobs_menu:"):
+            await self._jobs_back_to_menu(update, query, data)
+
+        elif data.startswith("jobs:"):
+            # jobs:<лимит>:<биржа> — разделитель «:» безопасен: в именах
+            # площадок только буквы и подчёркивания.
+            parts = data.split(":", 2)
+            if len(parts) != 3 or not parts[1].isdigit():
+                await query.answer("Неверная выборка.", show_alert=True)
+                return
+            await self._jobs_platform_list(update, query, int(parts[1]), parts[2])
 
         # ------------------------------------------------------------ меню настроек
         elif data.startswith("settings:"):
