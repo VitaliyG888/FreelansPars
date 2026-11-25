@@ -172,6 +172,7 @@ class FakeStore:
         self.filters: dict[int, UserFilterPrefs] = {}
         self.fav_map: dict[int, set[str]] = {}
         self.delivered: set[tuple[int, str]] = set()
+        self.drafts: dict[str, str] = {}
 
     def list_bot_admins(self) -> set[int]:
         return set(self.bot_admins)
@@ -258,11 +259,13 @@ class FakeStore:
         self.rejected.append(message_id)
 
     def set_draft(self, uid: str, draft_text: str, card_text: str | None = None) -> None:
-        # Заглушка: no-op, нужна чтобы notify_new_job не падал с FakeStore.
-        pass
+        # Черновики запоминаются: квиз поднимает их после «рестарта».
+        self.drafts[uid] = draft_text
 
     def get_order(self, uid: str) -> dict | None:
-        """Заглушка возвращает None — для реальных тестов используется JobStore."""
+        """Отдаёт сохранённый черновик, как настоящий JobStore."""
+        if uid in self.drafts:
+            return {"draft_text": self.drafts[uid]}
         return None
 
     def mark_sent_clicked(self, uid: str) -> bool:

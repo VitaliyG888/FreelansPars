@@ -196,6 +196,15 @@ def quiz_keyboard(session: QuizSession, job: Job) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def edit_keyboard(job: Job) -> InlineKeyboardMarkup:
+    """Кнопки режима правки: выйти можно всегда, чтобы не застрять в ожидании."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✖️ Отмена", callback_data=f"{Q_CANCEL}:{job.uid}")],
+        ]
+    )
+
+
 def draft_keyboard(job: Job) -> InlineKeyboardMarkup:
     """Кнопки готового письма: редактировать, скопировать, перегенерировать."""
     return InlineKeyboardMarkup(
@@ -381,6 +390,28 @@ class QuizCommandsMixin:
     def _render_quiz(self, session: QuizSession, job: Job) -> tuple[str, InlineKeyboardMarkup]:
         return quiz_prompt_text(session, job), quiz_keyboard(session, job)
 
+    def _session_draft(self, session: QuizSession) -> str:
+        """Черновик из сессии, а после рестарта — из БД.
+
+        Сессии живут в памяти, поэтому готовое письмо теряется при
+        перезапуске бота. Без подъёма из БД кнопка «Редактировать» на старом
+        сообщении предлагала бы заново пройти квиз вместо правки письма.
+        """
+        if session.draft:
+            return session.draft
+        if self.store is None:
+            return ""
+        try:
+            order = self.store.get_order(session.job_uid)
+        except Exception:  # noqa: BLE001 - БД не должна ломать квиз
+            log.exception("cannot load draft for %s", session.job_uid)
+            return ""
+        draft = str(order.get("draft_text") or "") if order else ""
+        if draft:
+            session.draft = draft
+            session.step = len(QUIZ_STEPS)
+        return draft
+
     # ------------------------------------------------------------------ callback'и
     async def _handle_quiz_callback(
         self, update: Update, query: CallbackQuery, data: str
@@ -452,7 +483,7 @@ class QuizCommandsMixin:
         session.awaiting_text = False
         text, markup = self._render_quiz(session, job)
         await query.answer()
-        await self._quiz_edit(query, text, markup)
+        await self._quiz_show(query, chat_id, text, markup)
 
     async def _quiz_answer(
         self,
@@ -486,7 +517,7 @@ class QuizCommandsMixin:
             await self._quiz_finish(update, query, session, job)
             return
         text, markup = self._render_quiz(session, job)
-        await self._quiz_edit(query, text, markup)
+        await self._quiz_show(query, chat_id, text, markup)
 
     async def _quiz_begin_edit(
         self, update: Update, query: CallbackQuery, chat_id: int, job_uid: str
@@ -498,21 +529,29 @@ class QuizCommandsMixin:
             return
         session = self._quiz_session(chat_id, job_uid)
         session.awaiting_text = True
-        await query.answer()
-        if session.draft and session.step >= len(QUIZ_STEPS):
+        await query.answer("Пришлите текст одним сообщением")
+        # Черновик мог остаться в БД после рестарта: тогда это правка письма,
+        # а не заново пройденный квиз.
+        if self._session_draft(session) and session.step >= len(QUIZ_STEPS):
             text = (
                 "✏️ <b>Правка письма</b>\n\n"
-                "Пришлите новый текст письма одним сообщением — он заменит текущий."
+                "Пришлите новый текст письма <b>одним сообщением</b> — он заменит текущий.\n\n"
+                "<i>Можно прислать и часть: например, только первый абзац — "
+                "письмо заменится целиком, так что пришлите весь текст.</i>"
             )
         else:
             index = min(session.step, len(QUIZ_STEPS) - 1)
             step = QUIZ_STEPS[index]
             text = (
                 f"✍️ <b>Свой вариант · {html_escape(step.title)}</b>\n\n"
-                f"{html_escape(step.question)}\n"
-                "Пришлите ответ одним сообщением."
+                f"{html_escape(step.question)}\n\n"
+                "Напишите свой ответ <b>одним сообщением</b>.\n"
+                "<i>Отмена — /cancel или кнопка ниже.</i>"
             )
-        await self._quiz_edit(query, text, None)
+        # Это сообщение несёт инструкцию, поэтому оно не должно зависеть от
+        # возможности править карточку: ошибку правки видно только в логе,
+        # а пользователь в это время видит «кнопка не работает».
+        await self._quiz_show(query, chat_id, text, edit_keyboard(job))
 
     async def _quiz_copy(
         self, update: Update, query: CallbackQuery, chat_id: int, job_uid: str
@@ -546,7 +585,7 @@ class QuizCommandsMixin:
             await query.answer("Начнём заново", show_alert=True)
             session.step = 0
             text, markup = self._render_quiz(session, job)
-            await self._quiz_edit(query, text, markup)
+            await self._quiz_show(query, chat_id, text, markup)
             return
         await query.answer("🔄 Генерирую заново")
         await self._quiz_finish(update, query, session, job, regenerated=True)
@@ -568,8 +607,9 @@ class QuizCommandsMixin:
         )
         used_fallback = False
         if not draft:
-            await self._quiz_edit(
+            await self._quiz_show(
                 query,
+                session.chat_id,
                 "⚠️ Не удалось собрать письмо. Пришлите текст вручную — "
                 "кнопка «✏️ Редактировать» ниже.",
                 draft_keyboard(job),
@@ -585,8 +625,9 @@ class QuizCommandsMixin:
                 self.store.set_draft(job.uid, draft)
             except Exception:  # noqa: BLE001 - БД не должна ломать показ письма
                 log.exception("cannot persist quiz draft for %s", job.uid)
-        await self._quiz_edit(
+        await self._quiz_show(
             query,
+            session.chat_id,
             draft_text(job, draft, regenerated=regenerated, fallback=used_fallback),
             draft_keyboard(job),
         )
@@ -646,7 +687,9 @@ class QuizCommandsMixin:
         if update.message is None:
             return True
 
-        if session.draft and session.step >= len(QUIZ_STEPS):
+        # После рестарта черновик живёт в БД: поднимаем его, иначе правка
+        # письма снова ушла бы в шаги квиза.
+        if self._session_draft(session) and session.step >= len(QUIZ_STEPS):
             # Правка готового письма: текст заменяет черновик целиком.
             session.draft = text.strip()
             if self.store is not None:
@@ -799,9 +842,36 @@ class QuizCommandsMixin:
 
     async def _quiz_edit(
         self, query: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None
-    ) -> None:
-        """Правит сообщение квиза; при ошибке отправляет новое."""
+    ) -> bool:
+        """Правит сообщение квиза. True, если правка удалась.
+
+        Возвращает False вместо молчаливого проглатывания: вызывающий код
+        обязан отправить новое сообщение, иначе нажатие кнопки выглядит как
+        «ничего не произошло» — что и случалось на старых сообщениях.
+        """
         try:
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         except TelegramError as exc:
             log.debug("cannot edit quiz message: %s", exc)
+            return False
+        return True
+
+    async def _quiz_show(
+        self,
+        query: CallbackQuery,
+        chat_id: int,
+        text: str,
+        markup: InlineKeyboardMarkup | None,
+    ) -> bool:
+        """Показывает шаг квиза: правкой сообщения, а при отказе — новым.
+
+        Telegram не даёт править старые сообщения и тексты, которые не
+        изменились. Без этой страховки нажатие кнопки выглядело как поломка:
+        ошибка уходила в debug-лог, а в чате ничего не менялось.
+        """
+        if await self._quiz_edit(query, text, markup):
+            return True
+        await self._bot_send(
+            chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=markup
+        )
+        return False

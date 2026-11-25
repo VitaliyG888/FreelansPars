@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from telegram.error import TelegramError
 
 from conftest import make_job
 from freelance_bot.card_render import (
@@ -620,6 +621,65 @@ async def test_quiz_edit_rewrites_ready_draft(quiz) -> None:
 
     assert session.draft == "Новый текст письма"
     assert "Новый текст письма" in typing.message.replies[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_quiz_edit_shows_instruction_when_edit_fails(quiz) -> None:
+    """Если Telegram не даёт править сообщение, инструкция приходит новым.
+
+    Раньше ошибка правки уходила в debug-лог, и нажатие «Редактировать»
+    выглядело как «ничего не произошло».
+    """
+    controller, job = quiz
+    user = ADMIN_ID
+    controller.app.bot.sent.clear()
+
+    update = _FakeUpdate(user_id=user, callback=f"aq:edit:{job.uid}")
+
+    async def broken_edit(*args: object, **kwargs: object) -> None:
+        raise TelegramError("message can't be edited")
+
+    update.callback_query.edit_message_text = broken_edit  # type: ignore[method-assign]
+    await controller._handle_callback(update, SimpleNamespace(args=[]))
+
+    assert controller.app.bot.sent, "инструкция должна уйти отдельным сообщением"
+    text = controller.app.bot.sent[-1]["text"]
+    assert "Пришлите" in text or "Напишите" in text
+
+
+@pytest.mark.asyncio
+async def test_quiz_edit_after_restart_offers_draft_edit() -> None:
+    """Черновик из БД: после рестарта «Редактировать» правит письмо, а не шаг."""
+    from test_telegram import FakeStore, build_controller
+
+    store = FakeStore()
+    controller = build_controller(store=store, secrets=object())
+    job = full_job()
+    store.set_draft(job.uid, "Письмо из прошлой сессии")
+    controller.pending_approvals[job.uid] = SimpleNamespace(job=job)
+    user = ADMIN_ID
+
+    update = _FakeUpdate(user_id=user, callback=f"aq:edit:{job.uid}")
+    await controller._handle_callback(update, SimpleNamespace(args=[]))
+
+    shown = update.callback_query.edits[-1][0]
+    assert "Правка письма" in shown
+    assert "Шаг" not in shown
+
+    session = controller._quiz_sessions[f"{user}|{job.uid}"]
+    assert session.draft == "Письмо из прошлой сессии"
+
+
+@pytest.mark.asyncio
+async def test_quiz_edit_keyboard_has_cancel(quiz) -> None:
+    """В режиме ожидания текста остаётся выход: иначе легко застрять."""
+    controller, job = quiz
+    update = _FakeUpdate(user_id=ADMIN_ID, callback=f"aq:edit:{job.uid}")
+    await controller._handle_callback(update, SimpleNamespace(args=[]))
+
+    markup = update.callback_query.edits[-1][1]["reply_markup"]
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert "✖️ Отмена" in labels
 
 
 @pytest.mark.asyncio

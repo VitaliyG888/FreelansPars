@@ -9,12 +9,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 
 from curl_cffi.requests import AsyncSession
 
 from ..config import LLMConfig, Secrets
+
+log = logging.getLogger(__name__)
 
 
 class LLMError(RuntimeError):
@@ -86,6 +89,7 @@ class LLMClient:
     ) -> str:
         if not self.available:
             raise LLMError("LLM is not configured (missing API key or disabled)")
+        budget = max_tokens or self.cfg.max_output_tokens
         payload: dict[str, object] = {
             "model": self.model,
             "messages": [
@@ -93,11 +97,31 @@ class LLMClient:
                 {"role": "user", "content": user},
             ],
             "temperature": self.cfg.temperature if temperature is None else temperature,
-            "max_tokens": max_tokens or self.cfg.max_output_tokens,
+            "max_tokens": budget,
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
+        content, finish = await self._post(payload)
+        # Reasoning-модели (nemotron, o-series, R1) тратят весь бюджет на
+        # размышления и возвращают пустой content при finish_reason=length.
+        # Один повтор с запасом дешевле, чем молчаливый переход на шаблон.
+        if not content.strip() and finish == "length":
+            budget = min(budget * 4, 16_000)
+            payload["max_tokens"] = budget
+            log.info(
+                "LLM returned empty content (finish=length), retrying with %s tokens",
+                budget,
+            )
+            content, finish = await self._post(payload)
+        if not content.strip():
+            raise LLMError(
+                f"LLM returned empty content (finish_reason={finish or 'unknown'})"
+            )
+        return unwrap_text(content.strip())
+
+    async def _post(self, payload: dict[str, object]) -> tuple[str, str | None]:
+        """Один запрос к провайдеру: (content, finish_reason)."""
         headers = {
             "Content-Type": "application/json",
             **self.provider.headers,
@@ -114,16 +138,39 @@ class LLMClient:
             data = resp.json()
 
         try:
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            content = choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError(f"unexpected LLM response shape: {str(data)[:200]}") from e
-        if not isinstance(content, str) or not content.strip():
-            raise LLMError("LLM returned empty content")
-        return content.strip()
+        if not isinstance(content, str):
+            content = ""
+        return content, choice.get("finish_reason")
 
     async def complete_json(self, system: str, user: str) -> dict:
         raw = await self.complete(system, user, json_mode=True)
         return parse_json_loose(raw)
+
+
+def unwrap_text(raw: str) -> str:
+    """Достаёт текст письма из ответа модели.
+
+    Модель иногда возвращает не голый текст, а JSON вроде
+    ``{"text": "..."}`` — особенно если её так обучили или сбил соседний
+    json_mode. Пользователю нужен текст письма, а не фигурные скобки.
+    """
+    text = raw.strip()
+    if not text.startswith(("{", "[")):
+        return text
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if isinstance(data, dict):
+        for key in ("text", "message", "letter", "draft", "content", "response"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return text
 
 
 def parse_json_loose(raw: str) -> dict:
