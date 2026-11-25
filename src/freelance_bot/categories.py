@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -229,8 +230,6 @@ EXTRA_KEYWORDS: dict[str, tuple[str, ...]] = {
         "excel",
         "сайт",
         "веб-сайт",
-        "интернет-магазин",
-        "веб-приложение",
         "лендинг",
         "верстка",
         "фронтенд",
@@ -435,26 +434,41 @@ GENERIC_TERMS: frozenset[str] = frozenset({"другие", "74 языка"})
 #: «Сайт-визитка» — это сайт, но слово «визитка» внутри фразы совпадает с
 #: листом «Визитки» (печатная полиграфия) и перетягивает заказ в дизайн.
 #: Поэтому такие фразы распознаются целиком и сразу задают рубрику, минуя
-#: поэтапный подсчёт. Ключ — как фраза выглядит в тексте, значение —
-#: (рубрика, группа, подкатегория).
-PHRASE_ALIASES: tuple[tuple[tuple[str, ...], str, str, str], ...] = (
+#: поэтапный подсчёт.
+#:
+#: Поле ``blockers`` отменяет правило, когда фраза — лишь объект чужой
+#: работы: «реклама интернет-магазина» и «дизайн интернет-магазина» не
+#: являются созданием сайта.
+PHRASE_ALIASES: tuple[
+    tuple[tuple[str, ...], str, str, str, re.Pattern[str] | None], ...
+] = (
     (
         ("сайт-визитка", "сайт визитка", "сайт-визитку", "сайт визитку"),
         "programming",
         "Создание сайтов",
         "Новый сайт",
+        re.compile(r"печат|полиграф|типограф", re.IGNORECASE),
     ),
     (
         ("сайт-лендинг", "сайт лендинг"),
         "programming",
         "Создание сайтов",
         "Новый сайт",
+        None,
     ),
     (
         ("интернет-магазин", "интернет магазин"),
         "programming",
         "Создание сайтов",
         "Новый сайт",
+        re.compile(
+            r"реклам|продвижен|(?<![а-яё])seo(?![а-яё])|(?<![а-яё])дизайн"
+            r"|ux/?ui|юзабилити|аудит|обработк|фотомонтаж|контент|наполнен"
+            r"|(?<![а-яё])текст|копирайт|маркетплейс|аналитик|отзыв|таргет"
+            r"|баннер|логотип|настройк|менеджер|(?<![а-яё])google|яндекс"
+            r"|директ|(?<![а-яё])ga4",
+            re.IGNORECASE,
+        ),
     ),
 )
 
@@ -513,7 +527,9 @@ def classify_job(job: Job) -> Classification:
 
     # Составные фразы проверяются раньше подсчёта: «сайт-визитка» — это сайт,
     # хотя слово «визитка» внутри фразы относится к печатной полиграфии.
-    for phrase_names, phrase_key, phrase_group, phrase_sub in PHRASE_ALIASES:
+    for phrase_names, phrase_key, phrase_group, phrase_sub, blockers in PHRASE_ALIASES:
+        if blockers is not None and blockers.search(fields["title"]):
+            continue
         if any(contains_term(fields["title"], item) for item in phrase_names):
             phrase_category = CATEGORY_BY_KEY[phrase_key]
             return Classification(

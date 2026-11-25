@@ -323,6 +323,26 @@ def test_classify_site_business_card_is_programming() -> None:
         assert result.subcategory == "Новый сайт", title
 
 
+def test_classify_online_store_object_of_other_work() -> None:
+    """Интернет-магазин как объект чужой работы не становится «созданием сайта».
+
+    «Реклама интернет-магазина» — это продвижение, «дизайнер для
+    интернет-магазина» — дизайн. Правило создания сайта не должно их
+    перетягивать в программирование.
+    """
+    promo = classify_job(make_job("Реклама интернет магазина в Bing"))
+    assert promo.category_key == "promotion"
+
+    design = classify_job(make_job("Ищем UX/UI-дизайнера для интернет-магазина"))
+    assert design.category_key == "design"
+
+
+def test_classify_online_store_redesign_is_programming() -> None:
+    """«Редизайн интернет-магазина» остаётся работой по сайту, а не дизайном."""
+    result = classify_job(make_job("Доработка и редизайн интернет-магазина производителя"))
+    assert result.category_key == "programming"
+
+
 def test_classify_printed_business_card_stays_design() -> None:
     """Печатные визитки остаются в дизайне: правило не расширяется на них."""
     for title in ("Визитка для флориста", "Дизайн визитки"):
