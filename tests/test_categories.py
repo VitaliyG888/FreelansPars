@@ -493,6 +493,48 @@ def test_classify_seo_promotion_is_seo(title: str) -> None:
     assert classify_job(make_job(title)).category_key == "seo", title
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Персонаж для игры в Crusader king 3",
+        "Перерисовать персонажа под готовый скелет",
+        "Нарисовать персонажа для игры",
+    ],
+)
+def test_classify_character_art_is_design(title: str) -> None:
+    """Рисунок персонажа — дизайн, а не разработка игры.
+
+    Группа «Игры» в «Разработке и IT» весит 4.0, поэтому заказ нарисовать
+    персонажа во внутриигровом редакторе уходил в программирование.
+    """
+    assert classify_job(make_job(title)).category_key == "design", title
+
+
+def test_classify_character_code_stays_programming() -> None:
+    """Если рядом кодовый объект, заказ остаётся программированием."""
+    assert (
+        classify_job(make_job("Написать бота-персонажа для игры")).category_key
+        == "programming"
+    )
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Ищем специалиста для продвижения строительного сайта",
+        "Создать товарный фид для Яндекс Товары",
+    ],
+)
+def test_classify_recruiting_word_with_promotion_is_promotion(title: str) -> None:
+    """«Ищем специалиста для продвижения» — продвижение, не разработка.
+
+    Глагол «ищем» входит в признак разработки, поэтому такой заказ попадал
+    в «Разработку и IT», хотя глагол относится к поиску маркетолога.
+    """
+    expected = "promotion" if "продвижения" in title else "programming"
+    assert classify_job(make_job(title)).category_key == expected, title
+
+
 def test_classify_printed_business_card_stays_design() -> None:
     """Печатные визитки остаются в дизайне: правило не расширяется на них."""
     for title in ("Визитка для флориста", "Дизайн визитки"):

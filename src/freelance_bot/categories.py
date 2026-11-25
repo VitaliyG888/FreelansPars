@@ -279,6 +279,8 @@ EXTRA_KEYWORDS: dict[str, tuple[str, ...]] = {
         # «разработка», поэтому без имён сервисов рубрика не находилась.
         "amocrm",
         "битрикс24",
+        "товарный фид",
+        "фид для",
         # Латиница: заказчик пишет «Bitrix», «Joomla», «Shopify» — без этих
         # написаний рубрика не находилась, хотя работа та же.
         "bitrix",
@@ -581,6 +583,35 @@ TOP_INTENT = re.compile(
     re.IGNORECASE,
 )
 
+#: Рисунок персонажа: заказ на графику, даже если в заголовке есть «игра».
+CHARACTER_ART = re.compile(
+    r"персонаж|спрайт|арт\s+(?:для|под)|иллюстрац",
+    re.IGNORECASE,
+)
+
+#: Кодовый объект: если он рядом, заказ всё-таки про программирование
+#: («написать код для персонажа-бота»).
+CODE_OBJECT = re.compile(
+    r"код|скрипт|программ|бот|api|движок|механик",
+    re.IGNORECASE,
+)
+
+#: Глаголы, с которыми объект разработки действительно создают или меняют.
+#: «Настроить рекламу» содержит «настро», поэтому настройка сюда не входит:
+#: слово слишком общее и встречается в маркетинговых заказах.
+DEV_ACTION = re.compile(
+    r"созда|сдела|разработ|доработ|напис|собра|сверста|реализов|перенес|исправ",
+    re.IGNORECASE,
+)
+
+#: Объект разработки: с ним глагол создания означает заказ на разработку,
+#: а не на продвижение.
+DEV_OBJECT_ANY = re.compile(
+    r"сайт|приложени|(?<![а-яё])бот[а-яё]{0,3}(?![а-яё])|парсер|магазин|"
+    r"лендинг|скрипт|платформ|сервис",
+    re.IGNORECASE,
+)
+
 #: Продвижение и реклама. Заказчик пишет «раскрутить», «настроить
 #: продвижение», «вести рекламу» — это работа маркетолога, а не разработка.
 #: Проверяется только заголовок: в описании почти всегда есть «сайт»,
@@ -742,10 +773,14 @@ def classify_job(job: Job) -> Classification:
     seo_words = ("seo", "поисков", "вывести в топ", "вывод в топ", "в топ",
                  "семантическ", "ссылк", "крауд")
     is_seo_title = any(contains_term(title, word) for word in seo_words)
+    # «Ищем специалиста для продвижения сайта» — тоже продвижение, хотя
+    # глагол «ищем» входит в DEV_INTENT. Разработкой считается только
+    # создание конкретного объекта: «создать сайт с продвижением».
+    dev_object_build = DEV_ACTION.search(title) and DEV_OBJECT_ANY.search(title)
     if (
         PROMO_INTENT.search(title)
         and not is_seo_title
-        and not (DEV_INTENT.search(title) and not SALE_INTENT.search(title))
+        and not (dev_object_build and not SALE_INTENT.search(title))
     ):
         promo_category = CATEGORY_BY_KEY["promotion"]
         return Classification(
@@ -753,6 +788,18 @@ def classify_job(job: Job) -> Classification:
             category_name=promo_category.name,
             confidence=1.0,
             matched="продвижение",
+        )
+
+    # «Персонаж для игры» — это графика: заказчик рисует персонажа во
+    # внутриигровом редакторе, а не программирует игру. Группа «Игры» в
+    # «Разработке и IT» весит 4.0 и перетягивала такие заказы к себе.
+    if CHARACTER_ART.search(title) and not CODE_OBJECT.search(title):
+        art_category = CATEGORY_BY_KEY["design"]
+        return Classification(
+            category_key=art_category.key,
+            category_name=art_category.name,
+            confidence=1.0,
+            matched="персонаж",
         )
 
     if TOP_INTENT.search(title) and not DEV_INTENT.search(title):
