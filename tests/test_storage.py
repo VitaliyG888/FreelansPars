@@ -354,6 +354,46 @@ def test_reclassify_respects_confidence_threshold(store: JobStore) -> None:
     assert row["eligible"] == 0
 
 
+def test_reclassify_price_is_hard_limit_even_for_subscriber(store: JobStore) -> None:
+    """Цена ниже порога — жёсткое условие, выбор подписчика его не отменяет.
+
+    Раньше `allows_price` проверялся только для общего фильтра, а ветка
+    «рубрика выбрана подписчиком» цену игнорировала: заказы за 500 ₽ снова
+    становились подходящими и попадали в /jobs.
+    """
+    from freelance_bot.categories import CategoryFilter
+    from freelance_bot.models import BudgetKind
+
+    cheap = make_job(
+        external_id="c1", title="Создание сайта-визитки", budget=500.0
+    )
+    negotiable = make_job(
+        external_id="c2",
+        title="Создание сайта под ключ",
+        budget=None,  # type: ignore[arg-type]
+        kind=BudgetKind.UNKNOWN,
+    )
+    store.upsert_job(cheap, eligible=1)
+    store.upsert_job(negotiable, eligible=1)
+    store.set_user_filters(555, categories=["programming"])
+
+    store.reclassify_jobs(
+        cat_filter=CategoryFilter(
+            enabled=True, categories=("programming",), min_price_rub=1000
+        )
+    )
+
+    rows = {
+        row["uid"]: row["eligible"]
+        for row in store._conn.execute(  # noqa: SLF001 - проверка состояния базы
+            "SELECT uid, eligible FROM jobs"
+        )
+    }
+    assert rows[cheap.uid] == 0
+    # «По договорённости» — цена неизвестна, такой заказ нужен всегда.
+    assert rows[negotiable.uid] == 1
+
+
 def test_user_jobs_counts_match_platform_counts(store: JobStore) -> None:
     """Счётчики бирж в меню совпадают с числом заказов в списке.
 

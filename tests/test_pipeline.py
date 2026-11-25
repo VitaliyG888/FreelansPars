@@ -522,6 +522,67 @@ async def test_collect_skips_platform_by_schedule(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
+async def test_collect_polls_every_cycle_when_intervals_are_equal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Интервал площадки, равный интервалу цикла, — опрос каждый прогон.
+
+    Отметка опроса ставится в начале сбора, а следующий цикл стартует через
+    паузу после обработки: накопленное время могло оказаться на доли секунды
+    меньше интервала, и площадка молча пропускала такт. При равных 30
+    минутах это давало бы опрос раз в час.
+    """
+    from freelance_bot.config import PlatformConfig, RuntimeConfig
+    from freelance_bot.models import PlatformRunResult, TransportKind
+
+    calls: list[str] = []
+
+    class Scheduled:
+        platform = "kwork_ru"
+        transport = TransportKind.HTTP
+        cfg = PlatformConfig(
+            listing_url="https://kwork.ru/projects",
+            transport="http",
+            poll_interval_seconds=1800,
+        )
+
+        async def fetch(self, ctx):
+            calls.append(self.platform)
+            return [], PlatformRunResult(
+                platform=self.platform,
+                transport=self.transport,
+                outcome=Outcome.OK,
+            )
+
+    adapter = Scheduled()
+    monkeypatch.setattr("freelance_bot.pipeline.build_adapters", lambda cfg: [adapter])
+    monkeypatch.setattr("freelance_bot.pipeline.build_context", lambda *a, **k: object())
+    schedule = PollSchedule()
+    monkeypatch.setattr("freelance_bot.pipeline._POLL_SCHEDULE", schedule)
+
+    def config_with_cycle(seconds: int) -> AppConfig:
+        cfg = build_config("kwork_ru")
+        cfg.runtime = RuntimeConfig(poll_interval_seconds=seconds)
+        return cfg
+
+    # Цикл 30 минут, площадка 30 минут: оба прогона опрашивают биржу.
+    config = config_with_cycle(1800)
+    await collect(config, None)  # type: ignore[arg-type]
+    await collect(config, None)  # type: ignore[arg-type]
+    assert calls == ["kwork_ru", "kwork_ru"]
+
+    # Цикл чаще площадки: расписание снова работает, второй такт пропущен.
+    # Расписание свежее: предыдущие прогоны отметили опрос, и без сброса
+    # площадка была бы пропущена ещё до первого такта.
+    calls.clear()
+    monkeypatch.setattr("freelance_bot.pipeline._POLL_SCHEDULE", PollSchedule())
+    frequent = config_with_cycle(600)
+    await collect(frequent, None)  # type: ignore[arg-type]
+    await collect(frequent, None)  # type: ignore[arg-type]
+    assert calls == ["kwork_ru"]
+
+
+@pytest.mark.asyncio
 async def test_collect_manual_run_does_not_hit_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ручной `-p`-запуск опрашивает площадку даже сразу после автоцикла."""
     from freelance_bot.config import PlatformConfig

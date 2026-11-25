@@ -87,6 +87,11 @@ async def run_with_telegram(
         # CLI-флаг обрезается в те же границы, что и команда /interval:
         # частые проходы вредят площадкам, редкие — задерживают доставку.
         telegram_bot.interval_seconds = clamp_poll_interval(interval_seconds)
+        # Конфиг — тот же объект, что читает `collect`: расписание площадок
+        # сравнивает их интервал именно с `runtime.poll_interval_seconds`.
+        # Без синхронизации `--interval 1800` при `600` в конфиге заставлял бы
+        # kwork (1800) пропускать каждый второй прогон — опрос раз в час.
+        telegram_bot.config.runtime.poll_interval_seconds = telegram_bot.interval_seconds
 
     shutdown_event = asyncio.Event()
 

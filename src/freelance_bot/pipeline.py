@@ -92,9 +92,19 @@ async def collect(
 
     # Последовательно намеренно: лимиты по доменам уже сериализуют большую часть
     # работу, и один упавший адаптер не должен отравлять остальные.
+    #
+    # Интервал площадки, равный интервалу цикла, означает «опрашивать каждый
+    # прогон». Сравнение с расписанием здесь было бы хрупким: отметка опроса
+    # ставится в начале сбора, а следующий цикл стартует через паузу после
+    # обработки, поэтому накопленное время может оказаться на доли секунды
+    # меньше интервала и площадка молча пропускала бы такт — при равных
+    # 30 минутах это давало бы опрос раз в час.
+    cycle_interval = getattr(getattr(config, "runtime", None), "poll_interval_seconds", 0) or 0
     for adapter in adapters:
         cfg = getattr(adapter, "cfg", None)
         interval = cfg.poll_interval_seconds if cfg is not None else 0
+        if interval > 0 and cycle_interval > 0 and interval <= cycle_interval:
+            interval = 0
         if not manual_run:
             ok, wait_s = _POLL_SCHEDULE.should_poll(adapter.platform, interval)
             if not ok:
@@ -241,7 +251,6 @@ async def run_cycle(
                 return False
             return any(
                 prefs.allows_platform(job.platform)
-                and prefs.allows_price(job.budget_rub_estimate)
                 and prefs.allows_category(
                     classification.category_key,
                     classification.subcategory,

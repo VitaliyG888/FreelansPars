@@ -673,15 +673,25 @@ class JobStore:
                 sql += ", eligible = ?"
                 fields.append(0)
             elif cat_filter is not None:
-                allowed = cat_filter.allows(result) and cat_filter.allows_price(job)
+                # Цена — жёсткое условие, а не предпочтение: заказ дешевле
+                # порога не нужен никому, и выбор подписчика его не отменяет.
+                # Заказы без цены («по договорённости») пропускает сам
+                # ``allows_price``. Раньше цена проверялась только для
+                # общего фильтра, а через личный выбор дешёвые заказы снова
+                # становились подходящими.
+                price_ok = cat_filter.allows_price(job)
+                allowed = price_ok and cat_filter.allows(result)
                 # Тот же приоритет, что в конвейере: выбор подписчика важнее
-                # админского фильтра, но порог уверенности общий — слабое
-                # совпадение не становится подходящим только потому, что
-                # рубрика выбрана.
-                if not allowed and result.confidence >= cat_filter.min_confidence:
+                # админского фильтра по рубрикам, но порог уверенности общий —
+                # слабое совпадение не становится подходящим только потому,
+                # что рубрика выбрана.
+                if (
+                    not allowed
+                    and price_ok
+                    and result.confidence >= cat_filter.min_confidence
+                ):
                     allowed = any(
                         prefs.allows_platform(job.platform)
-                        and prefs.allows_price(job.budget_rub_estimate)
                         and prefs.allows_category(
                             result.category_key, result.subcategory, result.group
                         )
