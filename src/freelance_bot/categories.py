@@ -384,6 +384,8 @@ EXTRA_KEYWORDS: dict[str, tuple[str, ...]] = {
         "база клиентов",
         "лидогенерация",
         "реклама",
+        "раскрутка",
+        "раскрутить",
         "продвижение группы",
         "продвижение канала",
         "подписчики",
@@ -579,6 +581,17 @@ TOP_INTENT = re.compile(
     re.IGNORECASE,
 )
 
+#: Продвижение и реклама. Заказчик пишет «раскрутить», «настроить
+#: продвижение», «вести рекламу» — это работа маркетолога, а не разработка.
+#: Проверяется только заголовок: в описании почти всегда есть «сайт»,
+#: «домен», «сервер», и они перевешивали рубрику.
+PROMO_INTENT = re.compile(
+    r"раскрут|продвижен|продвинуть|реклам|рекламу|директолог|"
+    r"(?<![а-яё])smm(?![а-яё])|таргет|лидогенерац|"
+    r"настро\w*\s+(?:реклам|директ|кампани)",
+    re.IGNORECASE,
+)
+
 #: Объекты, которые в заказе почти всегда означают разработку. «Мобильное
 #: приложение» без глагола — всё равно работа, а не продажа актива.
 DEV_OBJECT_EXPLICIT = re.compile(
@@ -719,6 +732,27 @@ def classify_job(job: Job) -> Classification:
             subcategory="Продажи по телефону" if is_calling else "Найм специалиста",
             confidence=1.0,
             matched="вакансия",
+        )
+
+    # «Раскрутить форум», «продвижение Яндекс Услуг», «настроить рекламу» —
+    # это продвижение. Слово «домен» в описании весило как заказ на домены и
+    # уводило такую работу в «Разработку и IT». SEO проверяется раньше:
+    # «продвижение сайта» и «продвижение в топ» — это поисковая оптимизация,
+    # а не реклама, и оба словаря претендуют на тот же глагол.
+    seo_words = ("seo", "поисков", "вывести в топ", "вывод в топ", "в топ",
+                 "семантическ", "ссылк", "крауд")
+    is_seo_title = any(contains_term(title, word) for word in seo_words)
+    if (
+        PROMO_INTENT.search(title)
+        and not is_seo_title
+        and not (DEV_INTENT.search(title) and not SALE_INTENT.search(title))
+    ):
+        promo_category = CATEGORY_BY_KEY["promotion"]
+        return Classification(
+            category_key=promo_category.key,
+            category_name=promo_category.name,
+            confidence=1.0,
+            matched="продвижение",
         )
 
     if TOP_INTENT.search(title) and not DEV_INTENT.search(title):

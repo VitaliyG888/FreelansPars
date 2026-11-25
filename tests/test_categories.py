@@ -465,6 +465,34 @@ def test_classify_site_creation_with_promotion_stays_programming(title: str) -> 
     assert classify_job(make_job(title)).category_key == "programming", title
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Нужны гуру продвижения! Требуется раскрутить форум",
+        "Настроить продвижение Яндекс Услуги",
+        "Раскрутить группу ВКонтакте",
+        "Настроить рекламу в Директе",
+    ],
+)
+def test_classify_promotion_work_is_promotion(title: str) -> None:
+    """Раскрутка и реклама — маркетинг, а не разработка.
+
+    В описании таких заказов почти всегда есть «домен», «сайт», «сервер»:
+    они перевешивали по весу и уводили работу маркетолога в «Разработку
+    и IT».
+    """
+    assert classify_job(make_job(title)).category_key == "promotion", title
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["SEO-продвижение сайта", "Продвижение в топ Яндекса", "Продвижение сайта ссылками"],
+)
+def test_classify_seo_promotion_is_seo(title: str) -> None:
+    """Поисковое продвижение остаётся в SEO, хотя слово «продвижение» общее."""
+    assert classify_job(make_job(title)).category_key == "seo", title
+
+
 def test_classify_printed_business_card_stays_design() -> None:
     """Печатные визитки остаются в дизайне: правило не расширяется на них."""
     for title in ("Визитка для флориста", "Дизайн визитки"):
