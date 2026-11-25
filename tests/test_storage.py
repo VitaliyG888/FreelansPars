@@ -274,6 +274,35 @@ def test_reclassify_keeps_subscriber_chosen_categories(store: JobStore) -> None:
     assert row["eligible"] == 1
 
 
+def test_reclassify_drops_disabled_platform_jobs(store: JobStore) -> None:
+    """Заказы с отключённой биржи перестают быть подходящими.
+
+    Когда владелец оставляет только одну площадку, старые заказы остальных
+    бирж не должны всплывать в /jobs.
+    """
+    from freelance_bot.categories import CategoryFilter
+
+    site = Classification(category_key="programming", category_name="Разработка и IT")
+    kept = make_job(platform="kwork_ru", external_id="k1", title="Создание сайта")
+    dropped = make_job(platform="fl_ru", external_id="f1", title="Создание сайта")
+    store.upsert_job(kept, eligible=1, classification=site)
+    store.upsert_job(dropped, eligible=1, classification=site)
+
+    store.reclassify_jobs(
+        cat_filter=CategoryFilter(enabled=True, categories=("programming",)),
+        enabled_platforms={"kwork_ru"},
+    )
+
+    rows = {
+        row["platform"]: row["eligible"]
+        for row in store._conn.execute(  # noqa: SLF001 - проверка состояния базы
+            "SELECT platform, eligible FROM jobs"
+        )
+    }
+    assert rows["kwork_ru"] == 1
+    assert rows["fl_ru"] == 0
+
+
 def test_reclassify_drops_job_nobody_wants(store: JobStore) -> None:
     """Заказ вне админского фильтра и вне выбора подписчиков остаётся вне выдачи."""
     from freelance_bot.categories import CategoryFilter

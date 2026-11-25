@@ -606,7 +606,11 @@ class JobStore:
         )
 
     def reclassify_jobs(
-        self, *, limit: int = 0, cat_filter: CategoryFilter | None = None
+        self,
+        *,
+        limit: int = 0,
+        cat_filter: CategoryFilter | None = None,
+        enabled_platforms: set[str] | None = None,
     ) -> dict[str, int]:
         """Пересчитывает рубрику у сохранённых заказов.
 
@@ -624,6 +628,11 @@ class JobStore:
 
         Без ``cat_filter`` признак ``eligible`` не трогается: решение о показе
         остаётся за конвейером.
+
+        ``enabled_platforms`` — биржи, включённые в конфиге. Заказы с
+        отключённых площадок перестают быть подходящими: они остаются в базе
+        как история, но /jobs и доставка их больше не показывают. Без этого
+        списка площадки не проверяются.
 
         ``limit`` > 0 ограничивает число обрабатываемых записей.
 
@@ -658,7 +667,12 @@ class JobStore:
                 classified += 1
             fields: list[object] = [result.category_key, result.group, result.subcategory]
             sql = "UPDATE jobs SET category_key = ?, category_group = ?, subcategory = ?"
-            if cat_filter is not None:
+            if enabled_platforms is not None and job.platform not in enabled_platforms:
+                # Биржа отключена владельцем: заказ остаётся в базе, но не
+                # показывается и не доставляется.
+                sql += ", eligible = ?"
+                fields.append(0)
+            elif cat_filter is not None:
                 allowed = cat_filter.allows(result) and cat_filter.allows_price(job)
                 if not allowed:
                     # Тот же приоритет, что в конвейере: выбор подписчика

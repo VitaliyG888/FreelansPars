@@ -208,7 +208,13 @@ def reclassify(
             unknown_policy=cat_cfg.unknown_policy,
             min_price_rub=cat_cfg.min_price_rub,
         )
-        stats = store.reclassify_jobs(limit=limit, cat_filter=cat_filter)
+        stats = store.reclassify_jobs(
+            limit=limit,
+            cat_filter=cat_filter,
+            enabled_platforms={
+                name for name, platform in config.platforms.items() if platform.enabled
+            },
+        )
     finally:
         store.close()
     console.print(
