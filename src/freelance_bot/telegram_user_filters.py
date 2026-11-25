@@ -841,7 +841,7 @@ class UserFiltersCommandsMixin:
         delivered: list[int] = []
         # Подсказка «Полезно знать» — второе сообщение эталона: в карточке
         # причин показа нет, но знать, почему заказ прислали, полезно.
-        hint = render_hint(scored.score.summary_ru)
+        hint = render_hint(scored.score.summary_ru, job=job)
         for chat_id in chat_ids:
             # Клавиатура зависит от чата: состояние ♥ у каждого своё, поэтому
             # собирается внутри цикла, а не один раз на заказ.

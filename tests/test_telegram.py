@@ -2007,7 +2007,10 @@ async def test_deliver_job_sends_hint_as_second_message() -> None:
 
     assert len(controller.app.bot.sent) == 2
     card, hint = controller.app.bot.sent
-    assert "💡 <b>Полезно знать:</b>" in hint["text"]
+    assert "💡 <b>Полезно знать</b>" in hint["text"]
+    # Подсказка называет заказ: карточка и причина приходят раздельно.
+    assert "Разработка Telegram-бота" in hint["text"]
+    assert "#1" in hint["text"]
     # В карточке причины показа нет — только в подсказке.
     assert "Полезно знать" not in card["text"]
     # Клавиатура крепится к карточке, а не к подсказке.

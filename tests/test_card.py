@@ -25,6 +25,7 @@ from freelance_bot.models import BudgetKind, ClientInfo, Job
 from freelance_bot.telegram_quiz import (
     QUIZ_STEPS,
     QuizSession,
+    build_fallback_draft,
     build_prompt,
     draft_keyboard,
     draft_text,
@@ -298,8 +299,35 @@ def test_card_stamp_respects_timezone_argument() -> None:
 def test_hint_wraps_summary_with_title() -> None:
     text = render_hint("Заказ подходит под профиль разработчика.")
 
-    assert text.startswith("💡 <b>Полезно знать:</b>")
+    assert text.startswith("💡 <b>Полезно знать</b>")
     assert "Заказ подходит под профиль разработчика." in text
+
+
+def test_hint_names_the_job_it_explains() -> None:
+    """Подсказка приходит отдельным сообщением — без привязки к заказу непонятно."""
+    text = render_hint("Хороший бюджет.", job=full_job())
+
+    assert "Полезно знать" in text
+    assert "Разработка интернет-магазина на Next.js" in text
+    assert "#1842" in text
+
+
+def test_hint_without_job_stays_generic() -> None:
+    """Без Job (текстовый отчёт) заголовок остаётся коротким."""
+    text = render_hint("Хороший бюджет.")
+
+    assert text.startswith("💡 <b>Полезно знать</b>\n")
+    assert "#" not in text
+
+
+def test_hint_truncates_long_title() -> None:
+    job = full_job()
+    job.title = "Очень длинный заголовок заказа " * 6
+    text = render_hint("Хороший бюджет.", job=job)
+
+    first_line = text.split("\n", 1)[0]
+    assert len(first_line) < 160
+    assert "…" in first_line
 
 
 def test_hint_empty_summary_produces_nothing() -> None:
@@ -645,4 +673,46 @@ async def test_quiz_without_llm_reports_problem(monkeypatch: pytest.MonkeyPatch)
         await controller._handle_callback(update, SimpleNamespace(args=[]))
 
     assert update is not None
-    assert "LLM недоступен" in update.callback_query.edits[-1][0]
+    text = update.callback_query.edits[-1][0]
+    # Без LLM квиз не обрывается тупиком: он отдаёт шаблонное письмо.
+    assert "Письмо собрано по шаблону" in text
+    assert job.title[:40] in text
+    markup = update.callback_query.edits[-1][1]["reply_markup"]
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert "✏️ Редактировать" in labels
+
+
+def test_fallback_draft_uses_quiz_answers() -> None:
+    """Шаблон повторяет ответы: тон, акцент, вопрос про бюджет."""
+    job = full_job()
+    prompt_free = build_fallback_draft(
+        job,
+        {"tone": "friendly", "focus": "speed", "price": "ask", "question": "deadline"},
+    )
+
+    assert prompt_free.startswith("Здравствуйте! Увидел задачу")
+    assert "Могу взяться сразу" in prompt_free
+    assert "какой бюджет заложен" in prompt_free
+    assert "К какому сроку нужен результат?" in prompt_free
+
+
+def test_fallback_draft_names_price_when_asked() -> None:
+    job = full_job()
+    text = build_fallback_draft(
+        job,
+        {"tone": "professional", "focus": "experience", "price": "name", "question": "details"},
+    )
+
+    assert text.startswith("Добрый день.")
+    # Цена в письме — в рублях: оценка заказа пересчитана под площадку.
+    assert "150 000 ₽" in text
+
+
+def test_fallback_draft_respects_price_mode_skip() -> None:
+    job = full_job()
+    text = build_fallback_draft(
+        job, {"tone": "neutral", "focus": "plan", "price": "skip", "question": "details"}
+    )
+
+    assert "₽" not in text
+    assert "бюджет" not in text.casefold()

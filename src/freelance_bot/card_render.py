@@ -297,12 +297,21 @@ def order_id(job: Job) -> str | None:
     return raw
 
 
-def render_hint(summary: str | None, *, limit: int = 260) -> str:
+def render_hint(
+    summary: str | None,
+    *,
+    job: Job | None = None,
+    limit: int = 260,
+) -> str:
     """Второе сообщение эталона — «💡 Полезно знать» под карточкой.
 
     Причина показа живёт вне карточки: в самой карточке её быть не должно,
     но подписчику полезно знать, почему заказ ему прислали. Пустая причина
     превращается в пустую строку — тогда сообщение не отправляется.
+
+    ``job`` добавляет в заголовок название заказа и его номер: карточка и
+    подсказка приходят двумя сообщениями, и без привязки непонятно, к какому
+    заказу относится причина — особенно когда за цикл пришло несколько.
     """
     text = " ".join((summary or "").split())
     if not text or text == "—":
@@ -313,7 +322,22 @@ def render_hint(summary: str | None, *, limit: int = 260) -> str:
         if space > limit // 2:
             cut = cut[:space]
         text = cut.rstrip(" ,.;:—-") + "…"
-    return f"💡 <b>Полезно знать:</b>\n{html_escape(text)}"
+
+    header = "💡 <b>Полезно знать</b>"
+    if job is not None:
+        title = " ".join((job.title or "").split())
+        if len(title) > 60:
+            cut = title[:60]
+            space = cut.rfind(" ")
+            if space > 30:
+                cut = cut[:space]
+            title = cut.rstrip(" ,.;:—-") + "…"
+        if title:
+            header += f" · <i>{html_escape(title)}</i>"
+        oid = order_id(job)
+        if oid:
+            header += f" · #{html_escape(oid)}"
+    return f"{header}\n{html_escape(text)}"
 
 
 def render_job_card(

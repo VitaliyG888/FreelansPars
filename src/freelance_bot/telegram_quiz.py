@@ -213,15 +213,94 @@ def draft_keyboard(job: Job) -> InlineKeyboardMarkup:
     )
 
 
-def draft_text(job: Job, draft: str, *, regenerated: bool = False) -> str:
+def draft_text(
+    job: Job,
+    draft: str,
+    *,
+    regenerated: bool = False,
+    fallback: bool = False,
+) -> str:
     """Сообщение с готовым письмом (в <pre>, чтобы копировалось тапом)."""
-    title = "🔄 Письмо перегенерировано" if regenerated else "✅ Письмо готово"
+    if fallback:
+        title = "✍️ Письмо собрано по шаблону"
+        note = (
+            "LLM недоступен, поэтому текст собран из ваших ответов по шаблону. "
+            "Проверьте и поправьте под себя."
+        )
+    else:
+        title = "🔄 Письмо перегенерировано" if regenerated else "✅ Письмо готово"
+        note = "Что дальше: отредактировать, скопировать или перегенерировать."
     return (
         f"{title}\n"
         f"<i>{html_escape(job.title[:120])}</i>\n\n"
         f"<pre>{html_escape(draft)}</pre>\n\n"
-        "Что дальше: отредактировать, скопировать или перегенерировать."
+        f"{note}"
     )
+
+
+def build_fallback_draft(
+    job: Job,
+    answers: dict[str, str],
+    profile: FreelancerProfile | None = None,
+) -> str:
+    """Письмо по шаблону, когда LLM недоступен.
+
+    Квиз уже собрал ответы пользователя, поэтому шаблон не «здравствуйте, я
+    специалист»: он подставляет выбранный тон, акцент, цену и вопрос. Это
+    заметно лучше, чем тупик с ошибкой, и текст можно сразу править.
+    """
+    title = " ".join((job.title or "").split())[:90].rstrip(" ,.;:—-")
+    tone = answers.get("tone", "neutral")
+    focus = answers.get("focus", "plan")
+    price_mode = answers.get("price", "ask")
+    question_mode = answers.get("question", "details")
+
+    if tone == "friendly":
+        hello = "Здравствуйте!"
+    elif tone == "professional":
+        hello = "Добрый день."
+    else:
+        hello = "Здравствуйте."
+
+    lines = [f"{hello} Увидел задачу «{title}»."]
+
+    if focus == "experience":
+        skills = ", ".join((profile.skills if profile else [])[:3])
+        lines.append(
+            f"С похожими задачами работал не раз{f', в том числе по {skills}' if skills else ''}."
+        )
+    elif focus == "speed":
+        lines.append("Могу взяться сразу и держать вас в курсе на каждом этапе.")
+    else:
+        lines.append(
+            "Вижу задачу так: сначала уточняю детали, затем делаю основную часть "
+            "и показываю результат."
+        )
+
+    amount = job.budget_rub_estimate or job.budget_amount
+    if price_mode == "name" and amount:
+        lines.append(f"По стоимости ориентируюсь на {amount:,.0f} ₽.".replace(",", " "))
+    elif price_mode == "ask":
+        lines.append("Подскажите, какой бюджет заложен на эту задачу?")
+
+    if question_mode == "deadline":
+        lines.append("К какому сроку нужен результат?")
+    elif question_mode == "budget" and price_mode != "ask":
+        lines.append("На какой бюджет рассчитываете?")
+    elif question_mode == "details":
+        lines.append(
+            "Что уже есть по задаче — материалы, доступы или примеры того, "
+            "что вам нравится?"
+        )
+
+    lines.append("Готов обсудить детали в удобном для вас формате.")
+    text = " ".join(lines)
+    limit = 900
+    if len(text) > limit:
+        cut = text[:limit]
+        space = cut.rfind(" ")
+        text = cut[:space].rstrip(" ,.;:") + "."
+    return text
 
 
 def build_prompt(
@@ -482,17 +561,22 @@ class QuizCommandsMixin:
         regenerated: bool = False,
     ) -> None:
         """Генерирует письмо по ответам квиза и показывает результат."""
+        # Ответы уже собраны, поэтому запасной шаблон лучше тупика: письмо
+        # будет без LLM, но кнопки правки и копирования на месте.
         draft = await self.generate_quiz_draft(
-            job, session.answers, query=query, chat_id=session.chat_id
+            job, session.answers, query=query, chat_id=session.chat_id, with_fallback=True
         )
+        used_fallback = False
         if not draft:
             await self._quiz_edit(
                 query,
-                "⚠️ Не удалось собрать письмо: LLM недоступен. "
-                "Попробуйте позже или напишите текст вручную кнопкой «✏️ Редактировать».",
-                None,
+                "⚠️ Не удалось собрать письмо. Пришлите текст вручную — "
+                "кнопка «✏️ Редактировать» ниже.",
+                draft_keyboard(job),
             )
             return
+        if self.secrets is None or not LLMClient(self.config.llm, self.secrets).available:
+            used_fallback = True
         session.draft = draft
         session.step = len(QUIZ_STEPS)
         session.awaiting_text = False
@@ -502,7 +586,9 @@ class QuizCommandsMixin:
             except Exception:  # noqa: BLE001 - БД не должна ломать показ письма
                 log.exception("cannot persist quiz draft for %s", job.uid)
         await self._quiz_edit(
-            query, draft_text(job, draft, regenerated=regenerated), draft_keyboard(job)
+            query,
+            draft_text(job, draft, regenerated=regenerated, fallback=used_fallback),
+            draft_keyboard(job),
         )
 
     # ------------------------------------------------------------------ ввод текста
@@ -591,13 +677,22 @@ class QuizCommandsMixin:
         self, job: Job, session: QuizSession, chat_id: int
     ) -> None:
         """Генерирует письмо после ответа текстом и отправляет в чат."""
-        draft = await self.generate_quiz_draft(job, session.answers, chat_id=chat_id)
+        draft = await self.generate_quiz_draft(
+            job, session.answers, chat_id=chat_id, with_fallback=True
+        )
         if not draft:
             await self._bot_send(
                 chat_id=chat_id,
-                text="⚠️ Не удалось собрать письмо: LLM недоступен.",
+                text=(
+                    "⚠️ Не удалось собрать письмо. Пришлите текст вручную — "
+                    "кнопка «✏️ Редактировать» ниже."
+                ),
+                reply_markup=draft_keyboard(job),
             )
             return
+        fallback = self.secrets is None or not LLMClient(
+            self.config.llm, self.secrets
+        ).available
         session.draft = draft
         session.step = len(QUIZ_STEPS)
         if self.store is not None:
@@ -607,7 +702,7 @@ class QuizCommandsMixin:
                 log.exception("cannot persist quiz draft for %s", job.uid)
         await self._bot_send(
             chat_id=chat_id,
-            text=draft_text(job, draft),
+            text=draft_text(job, draft, fallback=fallback),
             parse_mode="HTML",
             reply_markup=draft_keyboard(job),
         )
@@ -619,14 +714,19 @@ class QuizCommandsMixin:
         *,
         query: CallbackQuery | None = None,
         chat_id: int | None = None,
+        with_fallback: bool = False,
     ) -> str | None:
-        """Вызывает LLM с ответами квиза; None, если письмо собрать не удалось."""
+        """Вызывает LLM с ответами квиза; None, если письмо собрать не удалось.
+
+        ``with_fallback`` включает запасной текст по шаблону: квиз уже собрал
+        ответы, и оставлять пользователя с тупиком «LLM недоступен» хуже, чем
+        дать черновик, который можно поправить кнопкой «Редактировать».
+        """
         del query, chat_id  # параметры для симметрии вызовов и будущих уведомлений
-        if self.secrets is None:
-            return None
-        client = LLMClient(self.config.llm, self.secrets)
-        if not client.available:
-            return None
+        client = LLMClient(self.config.llm, self.secrets) if self.secrets else None
+        if client is None or not client.available:
+            log.info("quiz draft for %s: LLM не настроен", job.uid)
+            return build_fallback_draft(job, answers, self.profile) if with_fallback else None
 
         price = job.budget_rub_estimate or job.budget_amount
         prompt = build_prompt(job, answers, price_rub=price, profile=self.profile)
@@ -637,11 +737,11 @@ class QuizCommandsMixin:
             )
         except LLMError as exc:
             log.warning("quiz generation failed for %s: %s", job.uid, exc)
-            return None
+            return build_fallback_draft(job, answers, self.profile) if with_fallback else None
 
         draft = draft.strip().strip('"').strip()
         if not draft:
-            return None
+            return build_fallback_draft(job, answers, self.profile) if with_fallback else None
         violations = check(
             draft,
             job,
