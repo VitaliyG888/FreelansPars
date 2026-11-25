@@ -389,6 +389,7 @@ def test_classify_selling_ready_made_stays_business(title: str) -> None:
         "Прозвон базы каждый день",
         "Поиск менеджера по продажам",
         "Менеджер по продажам",
+        "Ищем контент-маркетолога / интернет-маркетолога B2В",
     ],
 )
 def test_classify_vacancy_and_cold_calls_stay_business(title: str) -> None:
@@ -400,6 +401,17 @@ def test_classify_vacancy_and_cold_calls_stay_business(title: str) -> None:
     вакансию вместо заказа.
     """
     assert classify_job(make_job(title)).category_key == "business", title
+
+
+def test_classify_low_confidence_job_is_not_programming() -> None:
+    """Заказ без IT-объекта не попадает в разработку из-за одного слабого слова.
+
+    «Требуется помощь по привлечению учеников репетитору» совпадал только
+    по слову «нейросет» из описания. Такие заказы не должны доходить до
+    подписчиков, выбравших «Разработку и IT».
+    """
+    result = classify_job(make_job("Требуется помощь по привлечению учеников репетитору"))
+    assert result.category_key != "programming"
 
 
 @pytest.mark.parametrize(
