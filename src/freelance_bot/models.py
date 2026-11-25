@@ -129,6 +129,9 @@ class Job(BaseModel):
     skills: list[str] = Field(default_factory=list)
     published_at: datetime | None = None
     deadline_at: datetime | None = None
+    deadline_text: str | None = Field(
+        default=None, description="Срок как его написала площадка: «3–4 недели», «2 дня»"
+    )
     proposals_count: int | None = None
     is_urgent: bool = False
     client: ClientInfo = Field(default_factory=ClientInfo)

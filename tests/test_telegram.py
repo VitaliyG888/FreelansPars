@@ -19,7 +19,7 @@ from telegram.error import BadRequest
 
 from conftest import make_job
 from freelance_bot.config import AppConfig, CategoryFilterConfig, PlatformConfig
-from freelance_bot.models import GeneratedMessage, JobAnalysis
+from freelance_bot.models import GeneratedMessage
 from freelance_bot.profile import FreelancerProfile, PricingConfig
 from freelance_bot.scoring.engine import ScoringEngine
 from freelance_bot.storage import JobStore
@@ -388,13 +388,16 @@ def build_profile() -> FreelancerProfile:
     )
 
 
-def build_controller(*, store: Any = None, profile: FreelancerProfile | None = None):
+def build_controller(
+    *, store: Any = None, profile: FreelancerProfile | None = None, secrets: Any = None
+):
     controller = TelegramBotController(
         token="123:test",
         admin_chat_ids=[ADMIN_ID],
         config=build_config(),
         profile=profile or build_profile(),
         store=store,
+        secrets=secrets,
     )
     controller.app = FakeApplication()
     controller.is_running = True
@@ -1939,15 +1942,10 @@ async def test_logs_empty_and_error_listing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_deliver_job_sends_analysis_price_and_buttons() -> None:
-    """Карточка в HTML содержит анализ, цену, черновик и кнопки с ♥."""
+async def test_deliver_job_renders_new_card_and_buttons() -> None:
+    """Карточка повторяет эталон: шапка, заголовок, бюджет, биржа и 3 ряда кнопок."""
     controller = build_controller()
     scored = scored_job(title="Бот со спецсимволами _*[]")
-    analysis = JobAnalysis(
-        need_summary_ru="Нужен бот с заявками и таблицами.",
-        skill_match=["Python", "Telegram Bot API"],
-        requirements=["Python"],
-    )
 
     delivered = await controller.deliver_job(
         [ADMIN_ID],
@@ -1955,7 +1953,6 @@ async def test_deliver_job_sends_analysis_price_and_buttons() -> None:
         "Здравствуйте! Сделаю бота на Python.",
         price=23000,
         strategy="markup",
-        analysis=analysis,
         message_id=42,
     )
 
@@ -1963,26 +1960,59 @@ async def test_deliver_job_sends_analysis_price_and_buttons() -> None:
     assert controller.app.bot.sent
     sent = controller.app.bot.sent[0]
     assert sent["chat_id"] == ADMIN_ID
-    # Теги именно рендерятся разметкой, а не приходят текстом.
     assert sent["parse_mode"] == "HTML"
-    assert "<b>Цена:</b>" in sent["text"]
-    assert "<b>Суть задачи:</b>" in sent["text"]
-    assert sent["reply_markup"] is not None
-    # В HTML нет экранированных метасимволов Markdown.
-    assert "\\*" not in sent["text"]
+    text = sent["text"]
+    # Шапка: иконка отрасли и бейдж «Новый».
+    assert "🟢 Новый" in text
+    assert "<b>Бот со спецсимволами _*[]</b>" in text
+    # Блоки бюджета и срока.
+    assert "💰 <b>Бюджет</b>" in text
+    assert "📅 <b>Срок выполнения</b>" in text
+    # Строка биржи и ID заказа.
+    assert "🌐 Биржа: FL.ru · ID заказа: #1" in text
+    # Убранное по требованию не появляется.
+    for removed in (
+        "Почему подходит",
+        "Суть задачи",
+        "Описание:",
+        "Письмо-черновик",
+        "Платформа:",
+        "балл:",
+    ):
+        assert removed not in text
+    # Ссылка в тексте не дублируется — она живёт в кнопке.
+    assert "https://" not in text
 
-    # Кнопки действия + избранное.
     keyboard = sent["reply_markup"]
-    btn_texts = [b.text for row in keyboard.inline_keyboard for b in row]
-    assert any("Отправить" in t for t in btn_texts)
-    assert any("Пропустить" in t for t in btn_texts)
-    assert any("Скопировать письмо" in t for t in btn_texts)
-    assert any("Открыть заказ" in t for t in btn_texts)
-    assert any("Понравилось" in t for t in btn_texts)
+    rows = [[b.text for b in row] for row in keyboard.inline_keyboard]
+    assert rows == [
+        ["🔗 Перейти на страницу заказа"],
+        ["🪄 Составить письмо-ответ с AI"],
+        ["♥ Выделить как понравившееся"],
+    ]
+    # Кнопка ссылки — именно url, а не callback.
+    assert keyboard.inline_keyboard[0][0].url
 
     pending = controller.pending_approvals[scored.job.uid]
     assert pending.approved is None
     assert pending.message_id == 42
+
+
+@pytest.mark.asyncio
+async def test_deliver_job_sends_hint_as_second_message() -> None:
+    """Причина показа уходит отдельным сообщением «Полезно знать»."""
+    controller = build_controller()
+
+    await controller.deliver_job([ADMIN_ID], scored_job(), "Черновик")
+
+    assert len(controller.app.bot.sent) == 2
+    card, hint = controller.app.bot.sent
+    assert "💡 <b>Полезно знать:</b>" in hint["text"]
+    # В карточке причины показа нет — только в подсказке.
+    assert "Полезно знать" not in card["text"]
+    # Клавиатура крепится к карточке, а не к подсказке.
+    assert card["reply_markup"] is not None
+    assert hint.get("reply_markup") is None
 
 
 @pytest.mark.asyncio
@@ -1994,11 +2024,27 @@ async def test_deliver_job_without_letter_keeps_favorite_button() -> None:
 
     assert delivered == [ADMIN_ID]
     sent = controller.app.bot.sent[0]
-    assert sent["reply_markup"] is not None
     keyboard = sent["reply_markup"]
-    assert [b.text for row in keyboard.inline_keyboard for b in row] == ["♥ Понравилось"]
-    assert "Письмо ещё не готово" in sent["text"]
+    rows = [[b.text for b in row] for row in keyboard.inline_keyboard]
+    assert rows[-1] == ["♥ Выделить как понравившееся"]
+    assert "🌐 Биржа:" in sent["text"]
+    assert "Письмо ещё не готово" not in sent["text"]
     assert not controller.pending_approvals
+
+
+@pytest.mark.asyncio
+async def test_deliver_job_favorite_button_reflects_state() -> None:
+    """Если заказ уже в избранном, кнопка предлагает убрать его."""
+    store = FakeStore()
+    store.add_favorite(ADMIN_ID, "fl_ru:1")
+    controller = build_controller(store=store)
+
+    await controller.deliver_job([ADMIN_ID], scored_job(), None)
+
+    keyboard = controller.app.bot.sent[0]["reply_markup"]
+    texts = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "💔 Убрать из избранного" in texts
+    assert "♥ Выделить как понравившееся" not in texts
 
 
 @pytest.mark.asyncio
@@ -2014,7 +2060,9 @@ async def test_deliver_job_falls_back_to_plain_text_on_parse_error() -> None:
     sent = controller.app.bot.sent[-1]
     assert sent.get("parse_mode") is None
     assert "<b>" not in sent["text"]
-    assert "Новый заказ" in sent["text"]
+    # Чистый текст сохраняет содержание карточки, но без разметки.
+    assert "FL.ru" in sent["text"]
+    assert "ID заказа: #1" in sent["text"]
     assert sent["reply_markup"] is not None
 
 
@@ -2034,15 +2082,15 @@ async def test_send_callback_delivers_draft_and_edits_card(tmp_path) -> None:
         update = FakeUpdate(callback=f"send:{scored.job.uid}", with_message=False)
         await controller._handle_callback(update, ctx())
 
-        # Письмо отправлено через bot.send_message: sent[0] — карточка,
-        # sent[1] — черновик, sent[2] — пометка «Открыто для ответа».
-        assert len(controller.app.bot.sent) == 3
-        sent_draft = controller.app.bot.sent[1]
+        # sent[0] — карточка, sent[1] — подсказка «Полезно знать»,
+        # sent[2] — черновик, sent[3] — пометка «Открыто для ответа».
+        assert len(controller.app.bot.sent) == 4
+        sent_draft = controller.app.bot.sent[2]
         assert "<pre>" in sent_draft["text"]
         assert "Текст письма для отправки" in sent_draft["text"]
 
-        # Второе сообщение — пометка об отправке.
-        assert "✅ Открыто для ответа" in controller.app.bot.sent[2]["text"]
+        # Последнее сообщение — пометка об отправке.
+        assert "✅ Открыто для ответа" in controller.app.bot.sent[3]["text"]
 
         # В БД записан статус.
         from freelance_bot.models import OrderStatus
@@ -2343,16 +2391,16 @@ async def test_favorite_callback_toggles_and_updates_button() -> None:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     card.callback_query.message.reply_markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("♥ Понравилось", callback_data="fav:fl_ru:1")]]
+        [[InlineKeyboardButton("♥ Выделить как понравившееся", callback_data="fav:fl_ru:1")]]
     )
 
     await controller._handle_callback(card, ctx())
 
     assert controller.store.is_favorite(ADMIN_ID, "fl_ru:1") is True
     assert "избранное" in (card.callback_query.answers[-1][0] or "")
-    # Кнопка перевернулась в «убрать».
+    # Кнопка перевернулась в «убрать» — текст совпадает с карточкой.
     markup = card.callback_query.edits[-1][1]["reply_markup"]
-    assert markup.inline_keyboard[0][0].text == "💔 Убрать"
+    assert markup.inline_keyboard[0][0].text == "💔 Убрать из избранного"
     assert markup.inline_keyboard[0][0].callback_data == "unfav:fl_ru:1"
 
     back = FakeUpdate(callback="unfav:fl_ru:1", with_message=False)

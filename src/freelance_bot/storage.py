@@ -417,7 +417,7 @@ class JobStore:
         with self._lock:
             row = self._conn.execute(
                 "SELECT uid, platform, external_id, url, order_url, title, status,"
-                " draft_text, card_text, score, budget_rub FROM jobs WHERE uid = ?",
+                " draft_text, card_text, score, budget_rub, payload FROM jobs WHERE uid = ?",
                 (uid,),
             ).fetchone()
         return dict(row) if row is not None else None

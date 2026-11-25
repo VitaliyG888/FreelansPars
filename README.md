@@ -120,8 +120,9 @@ orders the feed: clean and fresh jobs first)
 |       -> LLM JSON analysis + draft (if key set)     |
 |       -> guard check and one repair attempt         |
 |       -> deterministic Russian fallback             |
-|    -> Telegram notification (analysis + letter +    |
-|       [Отправить] / [Пропустить])                  |
+|    -> Telegram card (industry icon, budget,        |
+|       deadline, client block, 3 buttons: open /    |
+|       AI letter / favourite)                       |
 +-----------------------------------------------------+
       |
       v

@@ -203,6 +203,7 @@ def normalise(raw: RawJob, *, fx: dict[str, float], now: datetime | None = None)
         skills=raw.skills,
         published_at=published,
         deadline_at=deadline,
+        deadline_text=raw.deadline_text,
         proposals_count=raw.proposals_count,
         is_urgent=raw.is_urgent,
         client=raw.client if isinstance(raw.client, ClientInfo) else ClientInfo(),

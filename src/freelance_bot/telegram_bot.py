@@ -64,6 +64,7 @@ from telegram.ext import (
 )
 
 from .config import MAX_POLL_INTERVAL_SECONDS, MIN_POLL_INTERVAL_SECONDS
+from .telegram_quiz import QuizCommandsMixin, QuizSession
 from .telegram_settings import SELF_SERVICE_TOPICS, SettingsCommandsMixin, _parse_flag
 from .telegram_user_filters import UserFiltersCommandsMixin
 
@@ -490,7 +491,9 @@ class TelegramNotification:
     message_id: int | None = None
 
 
-class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
+class TelegramBotController(
+    QuizCommandsMixin, UserFiltersCommandsMixin, SettingsCommandsMixin
+):
     """Telegram-бот для управления во время работы и уведомлений."""
 
     def __init__(
@@ -532,6 +535,8 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
         # Ожидание многострочного ввода (/prompt system, /profile summary).
         self._awaiting_input: str | None = None
         self._awaiting_label: str = ""
+        # Сессии AI-квиза: короткий диалог в памяти, черновик — в SQLite.
+        self._quiz_sessions: dict[str, QuizSession] = {}
 
     async def start(self) -> None:
         """Запускает Telegram-бота."""
@@ -1572,8 +1577,12 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
                     InlineKeyboardButton(
                         "💔 Убрать из избранного"
                         if self.store.is_favorite(chat_id, str(row["uid"]))
-                        else "♥ Понравилось",
-                        callback_data=f"fav:{row['uid']}",
+                        else "♥ Выделить как понравившееся",
+                        callback_data=(
+                            f"unfav:{row['uid']}"
+                            if self.store.is_favorite(chat_id, str(row["uid"]))
+                            else f"fav:{row['uid']}"
+                        ),
                     )
                 ]
             )
@@ -1606,8 +1615,8 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
 
         if not rows:
             await update.message.reply_text(
-                "♥ В избранном пусто. Нажмите «♥ Понравилось» под заказом — "
-                "он появится здесь."
+                "♥ В избранном пусто. Нажмите «♥ Выделить как понравившееся» "
+                "под заказом — он появится здесь."
             )
             return
 
@@ -1939,6 +1948,15 @@ class TelegramBotController(UserFiltersCommandsMixin, SettingsCommandsMixin):
                 alert += f" Ваш ID: {own}"
             await query.answer(alert, show_alert=True)
             return
+
+        # ------------------------------------------------------------------ AI-квиз
+        # До общего answer(): каждый шаг квиза сам отвечает на callback своим
+        # сообщением («Отменено», «Генерирую заново»), а повторный ответ
+        # Telegram считает ошибкой.
+        if (query.data or "").startswith("aq:"):
+            await self._handle_quiz_callback(update, query, query.data or "")
+            return
+
         await query.answer()
 
         data = query.data

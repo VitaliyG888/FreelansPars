@@ -15,13 +15,20 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from html import escape as html_escape
 from typing import TYPE_CHECKING, Any
 
 from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
 
+from .card_render import (
+    FAV_OFF_LABEL,
+    FAV_ON_LABEL,
+    card_keyboard,
+    render_hint,
+    render_job_card,
+)
+from .categories import classify_job
 from .models import ScoredJob
 
 if TYPE_CHECKING:
@@ -685,7 +692,7 @@ class UserFiltersCommandsMixin:
     async def _handle_favorite_callback(
         self, update: Update, query: CallbackQuery, data: str
     ) -> None:
-        """Обрабатывает кнопки ♥ Понравилось / 💔 Убрать.
+        """Обрабатывает кнопки избранного «♥ Выделить…» / «💔 Убрать…».
 
         Формат: ``fav:<uid>`` / ``unfav:<uid>``. Избранное личное: ключ —
         чат, как и у фильтров. После переключения меняем подпись кнопки
@@ -721,15 +728,16 @@ class UserFiltersCommandsMixin:
         await self._flip_favorite_button(query, data)
 
     async def _flip_favorite_button(self, query: CallbackQuery, data: str) -> None:
-        """Переворачивает кнопку ♥/♥ в сообщении, откуда пришёл callback.
+        """Переворачивает кнопку избранного в сообщении, откуда пришёл callback.
 
-        Правим только саму кнопку: остальная клавиатура (открыть/скопировать/
-        отправить) остаётся нетронутой. Старые сообщения Telegram править
+        Правим только саму кнопку: «Перейти на страницу заказа» и «Составить
+        письмо-ответ» остаются нетронутыми. Старые сообщения Telegram править
         уже нельзя — ошибка уходит в журнал, состояние в базе верное.
         """
         action, _, job_uid = data.partition(":")
         new_action = "unfav" if action == "fav" else "fav"
-        new_label = "💔 Убрать" if action == "fav" else "♥ Понравилось"
+        # fav добавил заказ в избранное → кнопка предлагает убрать, и наоборот.
+        new_label = FAV_ON_LABEL if action == "fav" else FAV_OFF_LABEL
         message = query.message
         markup = getattr(message, "reply_markup", None) if message is not None else None
         rows = getattr(markup, "inline_keyboard", None) if markup is not None else None
@@ -776,13 +784,16 @@ class UserFiltersCommandsMixin:
         куда карточка реально ушла: пустой список означает «бот не работает»,
         и конвейер повторит доставку в следующем проходе.
 
-        Кнопки карточки:
-          ряд 1 — [🔗 Открыть заказ] [📋 Скопировать письмо]
-          ряд 2 — [✅ Отправить] [⏭ Пропустить]
-          ряд 3 — [♥ Понравилось]
+        Вёрстка карточки — в :mod:`card_render`; кнопки эталона:
+          ряд 1 — [🔗 Перейти на страницу заказа]
+          ряд 2 — [🪄 Составить письмо-ответ с AI]
+          ряд 3 — [♥ Выделить как понравившееся] / [💔 Убрать из избранного]
 
-        Без письма остаётся ряд с ссылкой и ♥: заказ всё равно показан,
-        откликнуться можно своим текстом.
+        Письмо в карточку больше не вставляется: его собирает AI-квиз по
+        ответам пользователя, поэтому черновик остаётся в базе до запроса.
+        ``price``, ``strategy`` и ``analysis`` сохранены в сигнатуре ради
+        конвейера: они больше не влияют на вёрстку, но их передача не должна
+        требовать правок в ``pipeline``.
         """
         # Отложенный импорт: telegram_bot импортирует этот модуль (mixin),
         # поэтому общий код карточек недоступен на уровне импорта.
@@ -792,115 +803,55 @@ class UserFiltersCommandsMixin:
             return []
 
         job = scored.job
-        score_total = scored.score.total
-        reasons = scored.score.summary_ru or "—"
 
-        budget_display = "—"
-        if job.budget_rub_estimate:
-            budget_display = f"{job.budget_rub_estimate:,.0f} ₽".replace(",", " ")
-        elif job.budget_amount:
-            budget_display = f"{job.budget_amount:,.0f} {job.currency}".replace(",", " ")
-
-        # order_url валидирован order_links.safe_order_url; без него показываем
-        # предупреждение, но карточку отправляем.
+        # order_url валидирован order_links.safe_order_url; без него кнопка
+        # ведёт по исходному URL, но карточку всё равно отправляем.
         order_url = job.order_url or job.url
-        link_label = "🔗 Открыть заказ"
         if job.order_url is None:
-            link_label = "⚠️ Открыть заказ (ссылка могла устареть)"
             log.warning(
                 "order_url missing for %s (%s), fallback: %s",
                 job.uid, job.platform, job.url,
             )
 
-        escaped_title = html_escape(job.title)
-        escaped_platform = html_escape(job.platform)
-        escaped_budget = html_escape(budget_display)
-        escaped_url = html_escape(order_url)
+        # Отрасль для шапки карточки: классификация детерминированная и
+        # дешёвая, поэтому считается здесь, не расширяя сигнатуру pipeline.
+        classification = classify_job(job)
+        text = render_job_card(
+            job,
+            category_key=classification.category_key,
+            category_name=classification.category_name,
+            timezone=self.config.runtime.timezone,
+        )
 
-        lines: list[str] = [
-            f"<b>🆕 Новый заказ</b> (балл: {score_total:.1f})",
-            "",
-            f"<b>Заголовок:</b> {escaped_title}",
-            f"<b>Платформа:</b> {escaped_platform}",
-            f"<b>Бюджет:</b> {escaped_budget}",
-            f"<b>Ссылка:</b> <a href=\"{escaped_url}\">{link_label}</a>",
-        ]
-
-        if price is not None:
-            labels = {
-                "minimum": "минимум",
-                "markup": "наценка",
-                "markup-floor": "наценка (минимум)",
-                "llm-estimate": "оценка LLM",
-                "llm-estimate-fallback": "оценка LLM (по бюджету)",
-                "llm-estimate-floor": "оценка LLM (минимум)",
-            }
-            label = labels.get(strategy or "", strategy or "")
-            price_str = f"{price:,.0f} ₽ ({label})".replace(",", " ")
-            lines.append(f"<b>Цена:</b> {html_escape(price_str)}")
-
-        lines.append("")
-        lines.append(f"<b>Почему подходит:</b> {html_escape(reasons)}")
-
-        if analysis is not None and analysis.need_summary_ru:
-            summary = analysis.need_summary_ru.strip()
-            if len(summary) > 400:
-                summary = summary[:400] + "…"
-            lines.extend(["", f"<b>Суть задачи:</b> {html_escape(summary)}"])
-
-        if analysis is not None and analysis.skill_match:
-            skills = html_escape(", ".join(analysis.skill_match[:5]))
-            lines.append(f"<b>Навыки:</b> {skills}")
-
-        if job.description:
-            desc = job.description[:300]
-            if len(job.description) > 300:
-                desc += "…"
-            lines.extend(["", f"<b>Описание:</b> {html_escape(desc)}"])
-
-        favorite_row = [
-            InlineKeyboardButton("♥ Понравилось", callback_data=f"fav:{job.uid}")
-        ]
-        keyboard: InlineKeyboardMarkup | None = None
+        if message_text and self.store:
+            # Черновик живёт в БД: кнопки AI-квиза работают после рестарта.
+            self.store.set_draft(job.uid, message_text)
         if message_text:
-            draft_html = f"<pre>{html_escape(message_text)}</pre>"
-            lines.extend(["", "<b>📝 Письмо-черновик:</b>", draft_html])
-
-            row1: list[InlineKeyboardButton] = [
-                InlineKeyboardButton(link_label, url=order_url),
-                InlineKeyboardButton(
-                    "📋 Скопировать письмо", callback_data=f"copy:{job.uid}"
-                ),
-            ]
-            row2 = [
-                InlineKeyboardButton("✅ Отправить", callback_data=f"send:{job.uid}"),
-                InlineKeyboardButton("⏭ Пропустить", callback_data=f"skip:{job.uid}"),
-            ]
-            keyboard = InlineKeyboardMarkup([row1, row2, favorite_row])
-
-            # Текст письма привязан к заказу в БД: callback'и копирования и
-            # отправки работают даже после рестарта бота.
-            if self.store:
-                self.store.set_draft(job.uid, message_text)
-
             self.pending_approvals[job.uid] = TelegramNotification(
                 job=job,
-                score_total=score_total,
-                score_summary=reasons,
+                score_total=scored.score.total,
+                score_summary=scored.score.summary_ru,
                 message_text=message_text,
                 approved=None,
                 message_id=message_id,
             )
         else:
-            lines.extend(
-                ["", "✉️ Письмо ещё не готово — откликнуться можно своим текстом."]
-            )
-            log.warning("deliver_job for %s: draft_text is empty", job.uid)
-            keyboard = InlineKeyboardMarkup([favorite_row])
+            log.info("deliver_job for %s: черновика нет, письмо по кнопке AI", job.uid)
 
-        text = "\n".join(lines)
         delivered: list[int] = []
+        # Подсказка «Полезно знать» — второе сообщение эталона: в карточке
+        # причин показа нет, но знать, почему заказ прислали, полезно.
+        hint = render_hint(scored.score.summary_ru)
         for chat_id in chat_ids:
+            # Клавиатура зависит от чата: состояние ♥ у каждого своё, поэтому
+            # собирается внутри цикла, а не один раз на заказ.
+            is_favorite = bool(self.store and self.store.is_favorite(chat_id, job.uid))
+            keyboard = card_keyboard(
+                job,
+                order_url=order_url,
+                is_favorite=is_favorite,
+                has_draft=bool(message_text),
+            )
             # Клавиатура крепится к последнему фрагменту, как в _reply.
             chunks = _chunk(text)
             ok = True
@@ -934,5 +885,13 @@ class UserFiltersCommandsMixin:
                         break
             if ok:
                 delivered.append(chat_id)
+                if hint:
+                    try:
+                        await self._bot_send(
+                            chat_id=chat_id, text=hint, parse_mode="HTML"
+                        )
+                    except TelegramError as e:
+                        # Подсказка вторична: её сбой не отменяет доставку заказа.
+                        log.debug("cannot send hint for %s to %s: %s", job.uid, chat_id, e)
         return delivered
 
