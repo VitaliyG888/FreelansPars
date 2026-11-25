@@ -153,6 +153,25 @@ async def test_fallback_strips_salutation_from_source_brief() -> None:
     assert message.text.lower().count("здравствуйте") == 1
 
 
+def test_prompts_forbid_copying_cliches_from_job() -> None:
+    """Промпт запрещает копировать клише из заказа.
+
+    Заказчик пишет «сайт под ключ», модель повторяла «под ключ» в письме —
+    и guard блокировал отправку как шаблонную фразу. Просить «не копируй»
+    дешевле, чем потом чинить каждое письмо.
+    """
+    from freelance_bot.llm.prompts import SYSTEM_PROMPT, analysis_prompt, repair_prompt
+
+    assert "не копируй" in SYSTEM_PROMPT.lower()
+
+    job = make_job(title="Создание сайта под ключ", description="Нужен сайт под ключ")
+    prompt = analysis_prompt(job)
+    assert "не копируй клише" in prompt.lower()
+
+    repair = repair_prompt("Текст", ["шаблонная фраза: «под ключ»"], 1000)
+    assert "не копируй" in repair.lower()
+
+
 def test_clean_for_message_drops_dangling_parenthetical() -> None:
     text = "Разработка сервиса многоканальных рассылок (Email, SMS, Telegram, MAX, WhatsApp, VK)"
     cleaned = MessageGenerator._clean_for_message(text, 80)
