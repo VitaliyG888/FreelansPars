@@ -212,6 +212,102 @@ async def test_personal_filters_choose_recipients(tmp_path: Path, monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_subscriber_choice_widens_admin_filter(tmp_path: Path, monkeypatch) -> None:
+    """Выбор подписчика не отменяется админским фильтром категорий.
+
+    Админ собирает только программирование, подписчик выбрал тексты: заказы
+    с текстами обязаны дойти, иначе выбор в /filters молча не работает.
+    """
+    from freelance_bot.storage import JobStore
+
+    config = build_config("fl_ru")
+    config.runtime.dry_run = True
+    config.network.respect_robots_txt = False
+    # Админский фильтр разрешает только одну категорию — заведомо не все.
+    config.category_filter.enabled = True
+    config.category_filter.categories = ["programming"]
+    secrets = build_secrets(tmp_path)
+    adapter = FixtureAdapter("fl_ru", load_html("fl_ru"))
+    monkeypatch.setattr("freelance_bot.pipeline.build_adapters", lambda cfg: [adapter])
+
+    store = JobStore(secrets.freelance_bot_db)
+    store.set_user_filters(TG_CHAT, categories=["writing_translations"])
+    tg = FakeTelegram()
+    try:
+        report = await run_cycle(
+            config, secrets, with_browser=False, telegram_bot=tg, store=store
+        )
+        # Сбор шире админского фильтра: заказы сохраняются как подходящие.
+        assert report.jobs_eligible > 0
+        # Доставка идёт только тем, чьим фильтрам заказ подходит, поэтому
+        # часть заказов из админской рубрики подписчику не уходит.
+        assert 0 < len(tg.notified) < report.jobs_eligible
+        # Главное: текстовые заказы не отрезаны админским «только программирование».
+        saved = store._conn.execute(  # noqa: SLF001 - проверка состояния базы
+            "SELECT COUNT(*) AS c FROM jobs WHERE eligible = 1"
+            " AND category_key = 'writing_translations'"
+        ).fetchone()
+        assert saved["c"] > 0
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_job_goes_to_each_matching_subscriber(tmp_path: Path, monkeypatch) -> None:
+    """Отметка «показан» не мешает второму подписчику получить тот же заказ."""
+    from freelance_bot.storage import JobStore
+
+    config = build_config("fl_ru")
+    config.runtime.dry_run = True
+    config.network.respect_robots_txt = False
+    secrets = build_secrets(tmp_path)
+    adapter = FixtureAdapter("fl_ru", load_html("fl_ru"))
+    monkeypatch.setattr("freelance_bot.pipeline.build_adapters", lambda cfg: [adapter])
+
+    store = JobStore(secrets.freelance_bot_db)
+    # Второй подписчик с пустым фильтром: ему нужен каждый заказ.
+    store.set_user_filters(999, platforms=[], categories=[])
+    tg = FakeTelegram()
+    try:
+        await run_cycle(config, secrets, with_browser=False, telegram_bot=tg, store=store)
+        # Оба чата в получателях, хотя заказ помечен показанным после первого.
+        assert TG_CHAT in tg.recipients
+        assert 999 in tg.recipients
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_resend_delivered_jobs(tmp_path: Path, monkeypatch) -> None:
+    """Повторный проход не дублирует карточки: доставка помнится по чату."""
+    from freelance_bot.storage import JobStore
+
+    config = build_config("fl_ru")
+    config.runtime.dry_run = True
+    config.network.respect_robots_txt = False
+    secrets = build_secrets(tmp_path)
+    adapter = FixtureAdapter("fl_ru", load_html("fl_ru"))
+    monkeypatch.setattr("freelance_bot.pipeline.build_adapters", lambda cfg: [adapter])
+
+    store = JobStore(secrets.freelance_bot_db)
+    tg = FakeTelegram()
+    try:
+        first = await run_cycle(
+            config, secrets, with_browser=False, telegram_bot=tg, store=store
+        )
+        delivered_first = len(tg.notified)
+        assert delivered_first == first.jobs_eligible
+
+        second = await run_cycle(
+            config, secrets, with_browser=False, telegram_bot=tg, store=store
+        )
+        assert second.jobs_announced == 0
+        assert len(tg.notified) == delivered_first
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_every_new_eligible_job_gets_first_letter(tmp_path: Path, monkeypatch) -> None:
     """Каждый новый подходящий заказ показывается сразу с первым письмом."""
     config = build_config("fl_ru")

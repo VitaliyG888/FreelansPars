@@ -212,16 +212,49 @@ async def run_cycle(
         for job in unique:
             classifications[job.uid] = classify_job(job)
 
+        # Аудитория доставки нужна уже на этапе сбора. Админский фильтр задаёт,
+        # что видит сам админ, но он не должен отменять выбор подписчика: если
+        # человек явно выбрал «Тексты и переводы», заказ из этой рубрики обязан
+        # дойти, даже когда админ собирает только IT. Раньше общий фильтр резал
+        # целые рубрики до личных фильтров, и выбор подписчика молча не работал.
+        recipients: dict[int, UserFilterPrefs] = {}
+        if telegram_bot is not None:
+            for chat_id in telegram_bot.audience_chat_ids():
+                recipients[chat_id] = UserFilterPrefs.default_for(chat_id)
+        for chat_id, prefs in store.all_user_filters().items():
+            recipients[chat_id] = prefs
+
+        # Расширяют сбор только явные выборы рубрик: фильтр без ограничений
+        # означает «всё, что прошло общий фильтр» и не должен его отменять.
+        subscriber_choices = [prefs for prefs in recipients.values() if prefs.categories]
+
+        def selected_by_subscriber(job: Job, classification: Classification) -> bool:
+            """Заказ явно выбран хотя бы одним подписчиком."""
+            return any(
+                prefs.allows_platform(job.platform)
+                and prefs.allows_price(job.budget_rub_estimate)
+                and prefs.allows_category(
+                    classification.category_key,
+                    classification.subcategory,
+                    classification.group,
+                )
+                for prefs in subscriber_choices
+            )
+
         if cat_filter.active:
             filtered: list[Job] = []
             for job in unique:
-                if cat_filter.allows(classifications[job.uid]):
+                classification = classifications[job.uid]
+                if cat_filter.allows(classification) or selected_by_subscriber(
+                    job, classification
+                ):
                     filtered.append(job)
             log.info(
-                "category filter: %d/%d jobs passed (%s)",
+                "category filter: %d/%d jobs passed (%s; выбор подписчиков: %d)",
                 len(filtered),
                 len(unique),
                 cat_filter.describe(),
+                len(subscriber_choices),
             )
             unique = filtered
 
@@ -241,10 +274,37 @@ async def run_cycle(
             )
         report.jobs_eligible = len(ranked_all)
 
-        # Показываем только те заказы, которые ещё ни разу не были отправлены
-        # в Telegram. Признак хранится в SQLite, поэтому рестарт сервиса не
+        # Кому именно нужен заказ: одинаковый заказ может быть нужен одному
+        # подписчику и не нужен другому, поэтому отметка «показан» глобальная
+        # лишь для админской ленты, а получатели считаются отдельно.
+        wanted_by_uid: dict[str, list[int]] = {}
+        if telegram_bot is not None:
+            for scored in ranked_all:
+                job = scored.job
+                classification = classifications[job.uid]
+                wanted_by_uid[job.uid] = [
+                    chat_id
+                    for chat_id, prefs in recipients.items()
+                    if prefs.matches(
+                        platform=job.platform,
+                        category_key=classification.category_key,
+                        subcategory=classification.subcategory,
+                        group=classification.group,
+                        budget_rub_estimate=job.budget_rub_estimate,
+                    )
+                    and not store.delivered_to(chat_id, job.uid)
+                ]
+
+        def has_recipient(scored: ScoredJob) -> bool:
+            """Заказ ещё кому-то нужен (или лента админа его не показывала)."""
+            if telegram_bot is None:
+                return not store.notified(scored.job.uid)
+            return bool(wanted_by_uid.get(scored.job.uid))
+
+        # Показываем только те заказы, которые ещё не доставлены всем, кому
+        # подходят. Признак хранится в SQLite, поэтому рестарт сервиса не
         # приводит к повторной рассылке.
-        candidates = [s for s in ranked_all if not only_new or not store.notified(s.job.uid)]
+        candidates = [s for s in ranked_all if not only_new or has_recipient(s)]
         # Приоритет выгрузки: сначала заказы без штрафов, внутри группы —
         # свежие; заказы со штрафами и старые уходят последними.
         candidates.sort(
@@ -254,15 +314,6 @@ async def run_cycle(
             )
         )
         report.top = candidates
-
-        # Аудитория доставки: все, у кого есть доступ (админы и подписчики),
-        # плюс все, кто настроил личные фильтры.
-        recipients: dict[int, UserFilterPrefs] = {}
-        if telegram_bot is not None:
-            for chat_id in telegram_bot.audience_chat_ids():
-                recipients[chat_id] = UserFilterPrefs.default_for(chat_id)
-            for chat_id, prefs in store.all_user_filters().items():
-                recipients[chat_id] = prefs
 
         generator = MessageGenerator(config, secrets, profile=profile)
         sender = OutboxSender(
@@ -316,19 +367,7 @@ async def run_cycle(
                 delivered_any = False
                 if telegram_bot is not None:
                     job = scored.job
-                    classification = classifications[job.uid]
-                    wanted = [
-                        chat_id
-                        for chat_id, prefs in recipients.items()
-                        if prefs.matches(
-                            platform=job.platform,
-                            category_key=classification.category_key,
-                            subcategory=classification.subcategory,
-                            group=classification.group,
-                            budget_rub_estimate=job.budget_rub_estimate,
-                        )
-                        and not store.delivered_to(chat_id, job.uid)
-                    ]
+                    wanted = wanted_by_uid.get(job.uid, [])
                     if wanted:
                         delivered_ids = await telegram_bot.deliver_job(
                             wanted,

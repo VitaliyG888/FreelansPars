@@ -250,6 +250,47 @@ def test_user_filters_roundtrip(store: JobStore) -> None:
     assert store.get_user_filters(111).platforms == []
 
 
+def test_reclassify_keeps_subscriber_chosen_categories(store: JobStore) -> None:
+    """Переклассификация не отсекает рубрики, выбранные подписчиком.
+
+    Админский фильтр собирает только программирование, но подписчик выбрал
+    тексты — после пересчёта такие заказы должны остаться подходящими.
+    """
+    from freelance_bot.categories import CategoryFilter
+
+    job = make_job(title="Написать три статьи", description="Тексты для блога")
+    store.upsert_job(job, eligible=0)
+    store.set_user_filters(555, categories=["writing_translations"])
+
+    cat_filter = CategoryFilter(enabled=True, categories=("programming",))
+    stats = store.reclassify_jobs(cat_filter=cat_filter)
+
+    assert stats["checked"] == 1
+    row = store._conn.execute(  # noqa: SLF001 - проверка состояния базы
+        "SELECT category_key, eligible FROM jobs WHERE uid = ?", (job.uid,)
+    ).fetchone()
+    assert row["category_key"] == "writing_translations"
+    assert row["eligible"] == 1
+
+
+def test_reclassify_drops_job_nobody_wants(store: JobStore) -> None:
+    """Заказ вне админского фильтра и вне выбора подписчиков остаётся вне выдачи."""
+    from freelance_bot.categories import CategoryFilter
+
+    job = make_job(title="Монтаж видео для блога", description="Видеоролик")
+    store.upsert_job(job, eligible=0)
+    store.set_user_filters(555, categories=["writing_translations"])
+
+    cat_filter = CategoryFilter(enabled=True, categories=("programming",))
+    store.reclassify_jobs(cat_filter=cat_filter)
+
+    row = store._conn.execute(  # noqa: SLF001 - проверка состояния базы
+        "SELECT category_key, eligible FROM jobs WHERE uid = ?", (job.uid,)
+    ).fetchone()
+    assert row["category_key"] == "audio_video"
+    assert row["eligible"] == 0
+
+
 def test_user_jobs_filtering_and_priority(store: JobStore) -> None:
     """user_jobs применяет личные фильтры; штрафные заказы идут последними."""
     clean, classification = scored_with_classification(external_id="1", title="Чистый")

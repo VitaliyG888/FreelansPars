@@ -617,6 +617,11 @@ class JobStore:
         группу, подкатегорию и — если передан ``cat_filter`` — признак
         ``eligible`` по общему фильтру категорий и цены.
 
+        Признак ``eligible`` считается по тому же правилу, что и в конвейере:
+        заказ подходит, если его пропускает общий фильтр **или** он выбран
+        хотя бы одним подписчиком. Иначе пересчёт вернул бы ту же потерю:
+        текстовые заказы остались бы вне выдачи, хотя подписчик их выбрал.
+
         Без ``cat_filter`` признак ``eligible`` не трогается: решение о показе
         остаётся за конвейером.
 
@@ -633,6 +638,10 @@ class JobStore:
             if limit > 0:
                 query += f" LIMIT {int(limit)}"
             rows = self._conn.execute(query).fetchall()
+        # Явные выборы подписчиков: они расширяют выдачу сверх общего фильтра.
+        subscriber_choices = [
+            prefs for prefs in self.all_user_filters().values() if prefs.categories
+        ]
 
         checked = classified = unknown = eligible_now = 0
         for row in rows:
@@ -651,6 +660,17 @@ class JobStore:
             sql = "UPDATE jobs SET category_key = ?, category_group = ?, subcategory = ?"
             if cat_filter is not None:
                 allowed = cat_filter.allows(result) and cat_filter.allows_price(job)
+                if not allowed:
+                    # Тот же приоритет, что в конвейере: выбор подписчика
+                    # важнее админского фильтра.
+                    allowed = any(
+                        prefs.allows_platform(job.platform)
+                        and prefs.allows_price(job.budget_rub_estimate)
+                        and prefs.allows_category(
+                            result.category_key, result.subcategory, result.group
+                        )
+                        for prefs in subscriber_choices
+                    )
                 if allowed:
                     eligible_now += 1
                 sql += ", eligible = ?"
