@@ -415,6 +415,23 @@ def test_classify_site_creation_variants() -> None:
         assert classify_job(make_job(title)).category_key == "programming", title
 
 
+def test_classify_it_jobs_without_literal_it_words() -> None:
+    """IT-работа без слов «сайт»/«разработка» тоже получает рубрику.
+
+    Заказчик пишет модель контроллера или имя CRM, а не «программист».
+    Раньше такие заказы оставались без рубрики и не доходили до подписчиков,
+    хотя это та же «Разработка и IT».
+    """
+    for title in (
+        "Написать код для контроллера на базе stm32f071cb",
+        "Настройка обработки писем в Битрикс24 по ID диалога",
+        "Создать виджет amoCRM или установить из действующих",
+        "Соединить в 1 csv и привести к единому формату",
+        "Создать копию страницы",
+    ):
+        assert classify_job(make_job(title)).category_key == "programming", title
+
+
 def test_designer_word_form_classifies_as_design() -> None:
     """«Ищу дизайнера» попадает в дизайн: словоформа больше не теряется."""
     result = classify_job(make_job("Ищу дизайнера"))
