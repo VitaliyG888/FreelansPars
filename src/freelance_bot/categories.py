@@ -330,6 +330,9 @@ EXTRA_KEYWORDS: dict[str, tuple[str, ...]] = {
         "поисковые запросы",
         "оптимизация сайта",
         "продвижение в топ",
+        "вывести в топ",
+        "вывод в топ",
+        "вывести сайт",
         "внутренняя оптимизация",
         "анализ сайтов",
     ),
@@ -504,9 +507,42 @@ DEV_INTENT = re.compile(
 
 #: Продажа и покупка готового — это бизнес, а не разработка. Проверяется
 #: первым: «продать приложение для андроид» остаётся в бизнесе.
+#: Хвост обязателен: «продающий сайт» — это сайт, который продаёт, а не
+#: продажа сайта. Без границы слова «продаю» совпадало с «продающий» и
+#: отменяло разработку.
 SALE_INTENT = re.compile(
-    r"прода(?:ть|м|ю|жа|ёж)|купи(?:ть|м|те)|готов\w*\s+(?:сайт|приложени|бот)"
-    r"|переуступ|в\s+аренду",
+    r"прода(?:ть|м|ю|жа|ёж)(?![а-яё])|купи(?:ть|м|те)(?![а-яё])"
+    r"|готов\w*\s+(?:сайт|приложени|бот)|переуступ|в\s+аренду",
+    re.IGNORECASE,
+)
+
+#: Вакансия и обзвон — это не разработка, хотя в описании такие заказы
+#: часто упоминают «скрипты», «сайт» и «разработку». Исполнителя ищут на
+#: постоянную работу или просят звонить по базе, поэтому слова из описания
+#: («скрипты-продаж», «услуги разработки сайтов») не должны поднимать такой
+#: заказ в «Разработку и IT»: подписчик получил бы вакансию вместо заказа.
+#:
+#: Проверяется только заголовок: описание почти всегда содержит пересказ
+#: чужих услуг, и опираться на него нельзя. Явный технический объект в
+#: заголовке («приложение для курьера», «сайт», «бот») отменяет правило —
+#: это уже заказ на разработку.
+VACANCY_INTENT = re.compile(
+    r"прозвон|прозвонить|обзвон|обзвонить|звонить|"
+    r"холодн\w*\s+(?:звонк|обзвон)|"
+    r"(?:ищу|ищем|нужен|нужна|требуетс|поиск)\s+(?:\w+\s+){0,2}"
+    r"(?:менеджер|маркетолог|сотрудник|оператор|курьер|специалист|"
+    r"репетитор|ассистент|продавц)|"
+    r"менеджер\w*\s+по\s+продаж",
+    re.IGNORECASE,
+)
+
+#: «Вывести сайт в топ» — это продвижение, а не разработка, хотя слово
+#: «сайт» в «Разработке и IT» весит столько же. Слова между глаголом и
+#: «в топ» допускаются: «вывести молодой сайт в топ». Заказ, где сайт ещё
+#: только создают, остаётся разработкой — поэтому проверяется намерение.
+TOP_INTENT = re.compile(
+    r"(?:вывест|вывод|вывед|продвиж|продвину|подня|поднят)\w*[^.]{0,40}"
+    r"(?<![а-яё])в\s+топ(?![а-яё])",
     re.IGNORECASE,
 )
 
@@ -516,7 +552,10 @@ DEV_OBJECT_EXPLICIT = re.compile(
     r"мобильн\w*\s+приложен|"
     r"веб-?приложен|десктопн|настольн\w*\s+приложен|"
     r"mini\s*app|"
-    r"приложен\w*\s+(?:для|под)\s+(?:android|ios|андроид|айфон|iphone|windows)",
+    # «Приложение для курьера», «приложение под Android»: заказчик называет
+    # назначение, а не продаёт готовый актив. Без этого «Приложение для
+    # курьера» уходило в «Продажу сайтов и групп» (рубрика «Бизнес»).
+    r"приложен\w*\s+(?:для|под)\s+[а-яёa-z0-9]",
     re.IGNORECASE,
 )
 
@@ -590,6 +629,25 @@ def classify_job(job: Job) -> Classification:
     # «продать приложение» — бизнес. Проверяется раньше подсчёта баллов,
     # потому что одинаковые слова дают одинаковый вес в обеих рубриках.
     title = fields["title"]
+    # Продажа готового приложения/сайта — это бизнес, а не разработка.
+    # Проверяется раньше подсчёта: лист «Приложения» есть и в рубрике
+    # «Бизнес», и в «Мобильных приложениях», и разработка перевешивала.
+    if SALE_INTENT.search(title) and (
+        DEV_OBJECT_EXPLICIT.search(title)
+        or DEV_OBJECT_APP.search(title)
+        or DEV_OBJECT_BOT.search(title)
+        or contains_term(title, "сайт")
+    ):
+        sale_category = CATEGORY_BY_KEY["business"]
+        return Classification(
+            category_key=sale_category.key,
+            category_name=sale_category.name,
+            group="Продажа сайтов и групп",
+            subcategory=None,
+            confidence=1.0,
+            matched="продажа",
+        )
+
     dev_intent = bool(DEV_INTENT.search(title)) and not SALE_INTENT.search(title)
     if not SALE_INTENT.search(title) and (
         DEV_OBJECT_EXPLICIT.search(title)
@@ -604,6 +662,39 @@ def classify_job(job: Job) -> Classification:
             subcategory=None,
             confidence=1.0,
             matched="разработка",
+        )
+
+    # Вакансия и обзвон отсекаются до подсчёта слов: иначе «скрипт» из
+    # «звонить по скрипту» и «сайт» из «услуги разработки сайтов» делают
+    # такой заказ «Разработкой и IT».
+    if VACANCY_INTENT.search(title) and not (
+        DEV_OBJECT_EXPLICIT.search(title)
+        or DEV_OBJECT_APP.search(title)
+        or DEV_OBJECT_BOT.search(title)
+        or contains_term(title, "сайт")
+        or contains_term(title, "парсер")
+        or contains_term(title, "приложение")
+    ):
+        vacancy_category = CATEGORY_BY_KEY["business"]
+        is_calling = bool(
+            re.search(r"прозвон|обзвон|звонить|звонк", title, re.IGNORECASE)
+        )
+        return Classification(
+            category_key=vacancy_category.key,
+            category_name=vacancy_category.name,
+            group="Обзвоны и продажи" if is_calling else "Подбор персонала",
+            subcategory="Продажи по телефону" if is_calling else "Найм специалиста",
+            confidence=1.0,
+            matched="вакансия",
+        )
+
+    if TOP_INTENT.search(title) and not DEV_INTENT.search(title):
+        seo_category = CATEGORY_BY_KEY["seo"]
+        return Classification(
+            category_key=seo_category.key,
+            category_name=seo_category.name,
+            confidence=1.0,
+            matched="продвижение в топ",
         )
 
     for phrase_names, phrase_key, phrase_group, phrase_sub, blockers in PHRASE_ALIASES:

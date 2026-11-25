@@ -379,6 +379,80 @@ def test_classify_selling_ready_made_stays_business(title: str) -> None:
     assert classify_job(make_job(title)).category_key == "business", title
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Прозвон базы потенциальных клиентов",
+        "Прозвонить базу и собрать заинтересованных",
+        "Прозвон готовой B2B-базы (50 номеров) по скрипту",
+        "Звонить по теплым заявкам",
+        "Прозвон базы каждый день",
+        "Поиск менеджера по продажам",
+        "Менеджер по продажам",
+    ],
+)
+def test_classify_vacancy_and_cold_calls_stay_business(title: str) -> None:
+    """Вакансии и обзвоны не попадают в IT из-за слов в описании.
+
+    Заказчик ищет человека на постоянную работу или просит звонить по базе.
+    В описании таких объявлений встречаются «скрипты», «сайт» и
+    «разработка», и заказ поднимался в «Разработку и IT»: подписчик получал
+    вакансию вместо заказа.
+    """
+    assert classify_job(make_job(title)).category_key == "business", title
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Мобильное приложение для курьера",
+        "Приложение для сотрудников (iOS/Android/web-desktop)",
+        "Приложение под Android для доставки",
+        "Создать сайт для менеджера по продажам",
+        "Парсер базы клиентов",
+    ],
+)
+def test_classify_it_work_with_recruiting_words_stays_programming(title: str) -> None:
+    """Технический объект в заголовке отменяет правило о вакансиях."""
+    assert classify_job(make_job(title)).category_key == "programming", title
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["продающий сайт", "Сделать продающий лендинг"],
+)
+def test_classify_selling_site_is_programming(title: str) -> None:
+    """«Продающий сайт» — сайт, который продаёт, а не продажа сайта."""
+    assert classify_job(make_job(title)).category_key == "programming", title
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Вывести сайт в топ",
+        "Вывод сайта в топ по SEO",
+        "Вывести молодой сайт в топ",
+        "Поднять сайт в топ",
+    ],
+)
+def test_classify_promotion_to_top_is_seo(title: str) -> None:
+    """«Вывести сайт в топ» — продвижение, а не разработка.
+
+    Слово «сайт» весит одинаково в обеих рубриках, и заказ на продвижение
+    попадал в «Разработку и IT», где подписчик ждёт заказы на создание.
+    """
+    assert classify_job(make_job(title)).category_key == "seo", title
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["Создать сайт и вывести в топ", "Разработка сайта с продвижением"],
+)
+def test_classify_site_creation_with_promotion_stays_programming(title: str) -> None:
+    """Если сайт ещё создают, это разработка, а не продвижение."""
+    assert classify_job(make_job(title)).category_key == "programming", title
+
+
 def test_classify_printed_business_card_stays_design() -> None:
     """Печатные визитки остаются в дизайне: правило не расширяется на них."""
     for title in ("Визитка для флориста", "Дизайн визитки"):
