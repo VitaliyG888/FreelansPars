@@ -823,16 +823,27 @@ class JobStore:
 
         if not isinstance(prefs, UserFilterPrefs):  # pragma: no cover - защита от типа
             raise TypeError("prefs must be UserFilterPrefs")
+        # Биржу фильтруем в SQL: иначе ограничение выборки обрезало бы часть
+        # заказов выбранной площадки. Общий предохранитель нужен только чтобы
+        # не читать в память гигантскую базу целиком, поэтому он много больше
+        # реальных объёмов и применяется до личных фильтров, а не вместо них.
+        sql = (
+            "SELECT uid, platform, title, budget_rub, score, penalty, url,"
+            " order_url, category_key, category_group, subcategory,"
+            " first_seen, last_seen, published_at, notified_at, status"
+            " FROM jobs WHERE eligible = 1"
+        )
+        params: tuple[object, ...] = ()
+        if platform is not None:
+            sql += " AND platform = ?"
+            params = (platform,)
+        sql += (
+            " ORDER BY (COALESCE(penalty, 0) > 0) ASC,"
+            " COALESCE(published_at, last_seen) DESC, last_seen DESC"
+            " LIMIT 20000"
+        )
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT uid, platform, title, budget_rub, score, penalty, url,"
-                " order_url, category_key, category_group, subcategory,"
-                " first_seen, last_seen, published_at, notified_at, status"
-                " FROM jobs WHERE eligible = 1"
-                " ORDER BY (COALESCE(penalty, 0) > 0) ASC,"
-                " COALESCE(published_at, last_seen) DESC, last_seen DESC"
-                " LIMIT 500"
-            ).fetchall()
+            rows = self._conn.execute(sql, params).fetchall()
         matched = [
             dict(row)
             for row in rows

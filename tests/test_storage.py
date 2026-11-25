@@ -11,6 +11,7 @@ from conftest import make_job
 from freelance_bot.categories import Classification
 from freelance_bot.models import GeneratedMessage, ScoreBreakdown, ScoredJob
 from freelance_bot.storage import JobStore
+from freelance_bot.user_prefs import UserFilterPrefs
 
 
 @pytest.fixture
@@ -289,6 +290,42 @@ def test_reclassify_drops_job_nobody_wants(store: JobStore) -> None:
     ).fetchone()
     assert row["category_key"] == "audio_video"
     assert row["eligible"] == 0
+
+
+def test_user_jobs_counts_match_platform_counts(store: JobStore) -> None:
+    """Счётчики бирж в меню совпадают с числом заказов в списке.
+
+    Раньше выборка обрезалась до 500 строк до применения личных фильтров,
+    поэтому меню обещало больше заказов, чем показывал список.
+    """
+    site = Classification(category_key="programming", category_name="Разработка и IT")
+    texts = Classification(category_key="writing_translations", category_name="Тексты")
+    # Заказов намеренно больше прежнего ограничения выборки (500 строк):
+    # иначе тест проходил бы и с ошибкой.
+    site_total = 620
+    for index in range(site_total):
+        job = make_job(
+            platform="kwork_ru",
+            external_id=f"k{index}",
+            title=f"Создание сайта номер {index}",
+            description="Нужен сайт под ключ",
+        )
+        store.upsert_job(job, eligible=1, classification=site)
+    for index in range(5):
+        job = make_job(
+            platform="fl_ru",
+            external_id=f"f{index}",
+            title=f"Написать статью {index}",
+            description="Текст для блога",
+        )
+        store.upsert_job(job, eligible=1, classification=texts)
+
+    prefs = UserFilterPrefs(chat_id=555, categories=["programming"])
+    counts = store.user_platform_counts(prefs)
+    assert counts["kwork_ru"] == site_total
+
+    _, total = store.user_jobs(prefs, limit=1)
+    assert total == site_total
 
 
 def test_user_jobs_filtering_and_priority(store: JobStore) -> None:
