@@ -343,6 +343,42 @@ def test_classify_online_store_redesign_is_programming() -> None:
     assert result.category_key == "programming"
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Необходимо создать моб. приложение с применением webview",
+        "Мобильное приложение",
+        "Сделать копию приложения для андроид",
+        "Создать сервис-приложение просмотра видео",
+        "Сделать демо-бота для тг (визитка с записью)",
+        "Нужен чат-бот для магазина",
+        "Разработка Telegram-бота",
+    ],
+)
+def test_classify_app_and_bot_work_is_programming(title: str) -> None:
+    """Разработка приложений и ботов — программирование, а не бизнес/дизайн.
+
+    В рубрике «Бизнес» есть лист «Приложения» (продажа готовых активов), из-за
+    него заказы на разработку уходили в бизнес. Слово «визитка» в описании
+    бота уводило заказ в полиграфию.
+    """
+    assert classify_job(make_job(title)).category_key == "programming", title
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Продать приложение для андроид",
+        "Купить готовое приложение",
+        "Записать видео-отзыв о языковом приложении",
+        "Приложение (каталог продукции) для врачей",
+    ],
+)
+def test_classify_selling_ready_made_stays_business(title: str) -> None:
+    """Продажа и обзор готового приложения остаются в бизнесе."""
+    assert classify_job(make_job(title)).category_key == "business", title
+
+
 def test_classify_printed_business_card_stays_design() -> None:
     """Печатные визитки остаются в дизайне: правило не расширяется на них."""
     for title in ("Визитка для флориста", "Дизайн визитки"):
