@@ -25,7 +25,7 @@
 
 /platforms      - включить/выключить площадки
 /categories     - общий фильтр категорий сбора
-/interval       - интервал цикла (только админ, 900-3600 секунд)
+/interval       - интервал цикла (только админ, 600-3600 секунд)
 /score          - штраф за красные флаги и свежесть (только админ)
 /pause /resume  - приостановка и возобновление сбора
 /llm /prompt /style /profile /skills - письма и профиль
@@ -278,9 +278,9 @@ COMMAND_HELP: tuple[CommandHelp, ...] = (
     CommandHelp(
         "interval",
         "/interval N",
-        "Интервал между проходами в секундах (только админ), от 900 до 3600.",
+        "Интервал между проходами в секундах (только админ), от 600 до 3600.",
         "Администрирование",
-        ("/interval 900",),
+        ("/interval 600",),
     ),
     CommandHelp("pause", "/pause", "Приостановить сбор заказов.", "Администрирование"),
     CommandHelp("resume", "/resume", "Возобновить сбор заказов.", "Администрирование"),
@@ -949,7 +949,7 @@ class TelegramBotController(
                 "/platforms — платформы: список, добавление, удаление",
                 "/categories — общий фильтр сбора",
                 "/score — штраф за красные флаги и свежесть",
-                "/interval — интервал циклов (900-3600 с)",
+                "/interval — интервал циклов (600-3600 с)",
                 "/users, /adduser, /deluser, /set_admin — доступ",
                 "",
                 "*Письма и профиль:*",
@@ -1244,7 +1244,7 @@ class TelegramBotController(
     async def _cmd_interval(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обрабатывает команду /interval — доступна только администратору.
 
-        Границы фиксированы: 900..3600 секунд (15-60 минут). Частые проходы
+        Границы фиксированы: 600..3600 секунд (10-60 минут). Частые проходы
         вредят площадкам (антибот-защита), редкие — задерживают доставку.
         """
         if not await self._ensure_super_admin(update):
@@ -1256,7 +1256,7 @@ class TelegramBotController(
         if not context.args:
             await update.message.reply_text(
                 "⏱️ Укажите интервал в секундах.\n\n"
-                f"Пример: `/interval {MIN_POLL_INTERVAL_SECONDS}` (15 минут)\n"
+                f"Пример: `/interval {MIN_POLL_INTERVAL_SECONDS}` (10 минут)\n"
                 f"Допустимо: {MIN_POLL_INTERVAL_SECONDS}-{MAX_POLL_INTERVAL_SECONDS} секунд "
                 "(настройка администратора).",
                 parse_mode="Markdown",
@@ -2327,17 +2327,20 @@ class TelegramBotController(
     async def notify_cycle_complete(
         self, jobs_collected: int, jobs_new: int, jobs_eligible: int, messages_generated: int
     ) -> None:
-        """Отправляет сводку о завершении цикла.
+        """Записывает статистику прохода и, если включено, шлёт сводку.
 
-        ``jobs_eligible`` здесь — число новых подходящих заказов, реально
-        показанных в этом проходе. Если новых нет, сводка не отправляется:
-        фоновые проходы без изменений не должны засорять чат.
+        Статистика обновляется всегда: её читает /status. Само сообщение
+        «цикл завершён» по умолчанию выключено (``runtime.cycle_report``),
+        потому что в чат должны приходить только новые заказы. Включается
+        командой ``/set runtime.cycle_report true``, если отчёт понадобится.
         """
         self.stats["jobs_collected"] = jobs_collected
         self.stats["jobs_new"] = jobs_new
         self.stats["jobs_eligible"] = jobs_eligible
         self.stats["messages_generated"] = messages_generated
 
+        if not self.config.runtime.cycle_report:
+            return
         if jobs_eligible <= 0:
             return
         if not self.app or not self.is_running:

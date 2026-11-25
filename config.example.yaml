@@ -6,7 +6,10 @@ runtime:
   timezone: Europe/Moscow
   # По умолчанию включён dry-run: письма рендерятся и логируются, но не отправляются.
   dry_run: true
-  poll_interval_seconds: 900          # 15 минут между полными циклами (900-3600, меняет админ)
+  poll_interval_seconds: 600          # 10 минут между полными циклами (600-3600, меняет админ)
+  # Сводка «цикл завершён» в Telegram. false — в чат приходят только новые
+  # заказы; true — после каждого прогона с новыми заказами приходит отчёт.
+  cycle_report: false
   max_jobs_per_platform: 40
   request_timeout_seconds: 25
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"

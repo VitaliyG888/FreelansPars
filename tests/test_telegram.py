@@ -1329,10 +1329,22 @@ async def test_interval_min_and_max_are_inclusive() -> None:
     controller = build_controller()
     update = FakeUpdate()
 
-    await controller._cmd_interval(update, ctx("900"))
-    assert controller.interval_seconds == 900
+    await controller._cmd_interval(update, ctx("600"))
+    assert controller.interval_seconds == 600
     await controller._cmd_interval(update, ctx("3600"))
     assert controller.interval_seconds == 3600
+
+
+@pytest.mark.asyncio
+async def test_interval_accepts_ten_minutes() -> None:
+    """600 секунд — новый минимум: прогон раз в 10 минут."""
+    controller = build_controller()
+    update = FakeUpdate()
+
+    await controller._cmd_interval(update, ctx("600"))
+
+    assert controller.interval_seconds == 600
+    assert any("600" in text and "✅" in text for text, _ in update.message.replies)
 
 
 @pytest.mark.asyncio
@@ -1343,7 +1355,7 @@ async def test_interval_is_super_admin_only() -> None:
 
     await controller._cmd_interval(update, ctx("1800"))
 
-    assert controller.interval_seconds == 900
+    assert controller.interval_seconds == 600
     assert any("только администратору" in text for text, _ in update.message.replies)
 
 
@@ -2178,13 +2190,25 @@ async def test_old_approve_callback_shows_migration_alert(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cycle_complete_updates_stats_and_notifies() -> None:
+async def test_cycle_complete_updates_stats_without_report_by_default() -> None:
+    """По умолчанию сводка не приходит: в чат должны идти только заказы."""
     controller = build_controller()
 
     await controller.notify_cycle_complete(10, 4, 2, 1)
 
     assert controller.stats["jobs_collected"] == 10
     assert controller.stats["messages_generated"] == 1
+    assert controller.app.bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_cycle_report_can_be_enabled() -> None:
+    """Отчёт остаётся доступным: включается через runtime.cycle_report."""
+    controller = build_controller()
+    controller.config.runtime.cycle_report = True
+
+    await controller.notify_cycle_complete(10, 4, 2, 1)
+
     assert "Цикл завершён" in controller.app.bot.sent[0]["text"]
 
 

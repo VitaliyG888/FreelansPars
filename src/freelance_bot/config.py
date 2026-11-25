@@ -16,7 +16,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class RuntimeConfig(BaseModel):
     timezone: str = "Europe/Moscow"
     dry_run: bool = True
-    poll_interval_seconds: int = 900
+    poll_interval_seconds: int = 600
+    #: Сводка «цикл завершён» в Telegram. По умолчанию выключена: в чат должны
+    #: приходить только новые заказы, а не отчёт о каждом прогоне.
+    cycle_report: bool = False
     max_jobs_per_platform: int = 40
     request_timeout_seconds: int = 25
     user_agent: str = (
@@ -356,12 +359,12 @@ DEFAULT_OVERRIDES_PATH = "var/runtime_settings.yaml"
 # Границы интервала между проходами. Настраивается только администратором:
 # слишком частые проходы вредят площадкам (антибот), редкие — задерживают
 # доставку заказов.
-MIN_POLL_INTERVAL_SECONDS = 900
+MIN_POLL_INTERVAL_SECONDS = 600
 MAX_POLL_INTERVAL_SECONDS = 3600
 
 
 def clamp_poll_interval(value: int) -> int:
-    """Обрезает интервал опроса в разрешённые границы 900..3600 секунд."""
+    """Обрезает интервал опроса в разрешённые границы 600..3600 секунд."""
     return max(MIN_POLL_INTERVAL_SECONDS, min(MAX_POLL_INTERVAL_SECONDS, int(value)))
 
 

@@ -142,7 +142,7 @@ async def run_with_telegram(
 
             # Ждём следующего цикла. Интервал может меняться во время работы
             # через команду Telegram /interval, поэтому читается на каждой
-            # итерации и обрезается в границы 900-3600.
+            # итерации и обрезается в границы 600-3600.
             current_interval = clamp_poll_interval(telegram_bot.interval_seconds)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(shutdown_event.wait(), timeout=current_interval)
@@ -255,11 +255,11 @@ def telegram_cmd(
 
         Запускает Telegram-бота и непрерывные циклы: каждый подписчик получает
         заказы по своим личным фильтрам (/filters). Интервал ограничен
-        900-3600 секундами и меняется только администратором.
+        600-3600 секундами и меняется только администратором.
 
         Примеры:
             python -m freelance_bot.cli telegram
-            python -m freelance_bot.cli telegram --interval 900
+            python -m freelance_bot.cli telegram --interval 600
             python -m freelance_bot.cli telegram --profile my_profile.yaml
     """
     try:

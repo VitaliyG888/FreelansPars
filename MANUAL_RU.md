@@ -258,13 +258,13 @@ Project_Parser/
 |---|---:|---|
 | `timezone` | `Europe/Moscow` | часовой пояс отображения |
 | `dry_run` | `true` | ничего не отправлять, только outbox |
-| `poll_interval_seconds` | `900` | интервал цикла по умолчанию (900–3600, меняется через `/interval`) |
+| `poll_interval_seconds` | `600` | интервал цикла по умолчанию (600–3600, меняется через `/interval`) |
 | `max_jobs_per_platform` | `40` | остановить пагинацию после N заказов |
 | `request_timeout_seconds` | `25` | таймаут HTTP-запроса |
 | `user_agent` | Chrome 131 | User-Agent для HTTP и браузера |
 | `accept_language` | `ru-RU,ru;q=0.9,...` | Accept-Language |
 
-`poll_interval_seconds` ограничен диапазоном 900–3600 секунд (`clamp_poll_interval`
+`poll_interval_seconds` ограничен диапазоном 600–3600 секунд (`clamp_poll_interval`
 в `config.py`): значения вне границ обрезаются при загрузке и при изменении через
 `/interval`. Команда `/interval` доступна только супер-админу.
 
@@ -790,7 +790,7 @@ python -m freelance_bot.cli telegram --interval 300 --top 10
 | `/settings` | А | включённые площадки, фильтр категорий, интервал |
 | `/platforms` | А | inline-кнопки включения/выключения площадок |
 | `/categories` | А | inline-кнопки фильтра и категорий |
-| `/interval N` | А | интервал 900..3600 секунд |
+| `/interval N` | А | интервал 600..3600 секунд |
 | `/score` | А | штраф красных флагов и свежесть: `/score penalty 0.35`, `/score freshness 18` |
 | `/pause` / `/resume` | А | приостановить/возобновить сбор |
 | `/stats` | Все | статистика за 7 дней из SQLite |

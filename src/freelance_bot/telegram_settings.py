@@ -377,7 +377,7 @@ class SettingsCommandsMixin:
             "⚙️ *Настройки бота*\n\n"
             f"*Режим:* {'🧪 dry-run' if cfg.runtime.dry_run else '🚀 live'} | "
             f"одобрение: {'да' if cfg.messaging.require_human_approval else 'нет'}\n"
-            f"*Интервал:* {self.interval_seconds} с (допустимо 900-3600)\n"
+            f"*Интервал:* {self.interval_seconds} с (допустимо 600-3600)\n"
             f"*Приоритет:* штраф {cfg.scoring.red_flag_penalty:g}, "
             f"свежесть {cfg.scoring.freshness_half_life_hours:g} ч (порогов балла нет)\n"
             f"*Категории:* {'✅' if cfg.category_filter.enabled else '❌'} {_md(cats)}\n"
@@ -402,7 +402,7 @@ class SettingsCommandsMixin:
                 "*Платформы и категории сбора*\n"
                 "/platforms — включить, выключить, добавить площадку\n"
                 "/categories — общий фильтр сбора\n"
-                "/interval — интервал циклов (900-3600 с)\n"
+                "/interval — интервал циклов (600-3600 с)\n"
                 "/score — штраф за красные флаги и свежесть\n"
                 "/pause, /resume — пауза и возобновление сбора\n\n"
                 "*Доступ и заявки*\n"
@@ -450,11 +450,14 @@ class SettingsCommandsMixin:
             return (
                 "⏱️ *Runtime*\n\n"
                 f"dry\\_run: `{cfg.runtime.dry_run}`\n"
-                f"интервал: `{self.interval_seconds}` с (границы 900-3600, меняет "
+                f"интервал: `{self.interval_seconds}` с (границы 600-3600, меняет "
                 "только админ командой `/interval`)\n"
+                f"cycle\\_report: `{cfg.runtime.cycle_report}` — сводка «цикл "
+                "завершён»; выключена, чтобы в чат приходили только заказы\n"
                 f"max\\_jobs\\_per\\_platform: `{cfg.runtime.max_jobs_per_platform}`\n"
                 f"timeout: `{cfg.runtime.request_timeout_seconds}` с\n\n"
-                "Изменить: `/set runtime.dry_run false`, `/interval 900`."
+                "Изменить: `/set runtime.dry_run false`, `/interval 600`, "
+                "`/set runtime.cycle_report true`."
             )
         if topic == "scoring":
             return (
