@@ -40,6 +40,19 @@ async def test_retries_with_bigger_budget_when_reasoning_ate_it() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retry_ladder_when_reasoning_needs_more_than_one_step() -> None:
+    """Длинный промпт съедает и первый запас: поднимаем бюджет дальше."""
+    client = _StubClient([("", "length"), ("", "length"), ("Письмо.", "stop")])
+
+    out = await client.complete("sys", "user")
+
+    assert out == "Письмо."
+    budgets = [p["max_tokens"] for p in client.payloads]
+    assert budgets == sorted(budgets), budgets
+    assert budgets[-1] > budgets[1]
+
+
+@pytest.mark.asyncio
 async def test_empty_content_without_length_raises() -> None:
     client = _StubClient([("", "stop")])
 

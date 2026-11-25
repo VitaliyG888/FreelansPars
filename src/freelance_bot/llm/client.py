@@ -105,9 +105,14 @@ class LLMClient:
         content, finish = await self._post(payload)
         # Reasoning-модели (nemotron, o-series, R1) тратят весь бюджет на
         # размышления и возвращают пустой content при finish_reason=length.
-        # Один повтор с запасом дешевле, чем молчаливый переход на шаблон.
-        if not content.strip() and finish == "length":
-            budget = min(budget * 4, 16_000)
+        # Один повтор у них не гарантия: на длинном системном промпте и 3600
+        # токенов может уйти в рассуждения целиком, поэтому пробуем лестницу.
+        for attempt_budget in (budget * 4, 8_000, 16_000):
+            if content.strip() or finish != "length":
+                break
+            if attempt_budget <= budget:
+                continue
+            budget = attempt_budget
             payload["max_tokens"] = budget
             log.info(
                 "LLM returned empty content (finish=length), retrying with %s tokens",
