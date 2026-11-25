@@ -10,6 +10,7 @@ import re
 from collections.abc import Sequence
 
 from ..config import MessageLimit, StyleConfig
+from ..domains import wrong_domain_note
 from ..models import Job
 
 LINK_RE = re.compile(
@@ -229,5 +230,12 @@ def check(
     # Злоупотребление длинными тире — сильный признак русской LLM.
     if text.count("—") >= 4:
         violations.append("слишком много длинных тире")
+
+    # Письмо должно быть про эту работу. Заказ на сайт с текстом про
+    # Telegram-бота — не стилистическая придирка, а прямое несоответствие:
+    # заказчик видит, что отклик не про его задачу.
+    domain_note = wrong_domain_note(text, job)
+    if domain_note:
+        violations.append(domain_note)
 
     return violations

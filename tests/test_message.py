@@ -138,7 +138,7 @@ async def test_fallback_uses_task_appropriate_approach() -> None:
 async def test_fallback_mentions_parser_for_parser_job() -> None:
     gen = generator(llm_api_key="")
     _, message = await gen.generate(JOB)
-    assert "сборщик данных" in message.text.lower()
+    assert "источники, пагинация" in message.text.lower()
     assert "По заданию" not in message.text
 
 
@@ -186,3 +186,33 @@ async def test_analysis_json_is_parsed_loosely(monkeypatch) -> None:
     wrapped = "```json\n" + json.dumps({"need_summary_ru": "тест"}, ensure_ascii=False) + "\n```"
     assert parse_json_loose(wrapped)["need_summary_ru"] == "тест"
     assert parse_json_loose('Вот результат: {"a": 1}')["a"] == 1
+
+
+def test_analysis_prompt_contains_whole_job_description() -> None:
+    """В промпт уходит описание целиком, а не первые 4000 символов.
+
+    kwork часто пишет длинное вступление про компанию, а суть — в конце.
+    Обрезанное описание приводило к письму не о той работе.
+    """
+    from freelance_bot.llm.prompts import analysis_prompt
+
+    tail = "В конце ТЗ: нужен именно сайт-каталог с фильтрами, не бот."
+    description = ("Вступление про компанию. " * 400) + tail
+    job = make_job(title="Разработка сайта-каталога", description=description)
+    prompt = analysis_prompt(job)
+    assert tail in prompt
+    assert len(prompt) > 4000
+
+
+def test_analysis_prompt_names_job_domain() -> None:
+    """Промпт явно называет область заказа, чтобы модель не уходила в другую."""
+    from freelance_bot.llm.prompts import analysis_prompt
+    from freelance_bot.profile import FreelancerProfile
+
+    job = make_job(
+        title="Разработка сайта компании",
+        description="Нужен коммерческий сайт с нуля, без конструктора.",
+    )
+    prompt = analysis_prompt(job, FreelancerProfile(), domain="web")
+    assert "ОБЛАСТЬ ЭТОГО ЗАКАЗА: web" in prompt
+    assert "не должен получать предложение сделать Telegram-бота" in prompt

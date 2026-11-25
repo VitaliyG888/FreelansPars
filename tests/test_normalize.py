@@ -116,3 +116,22 @@ def test_normalise_computes_published_from_text() -> None:
     assert job.published_at is not None
     age = datetime.now(UTC) - job.published_at
     assert 4.5 < age.total_seconds() / 3600 < 5.5
+
+
+def test_normalise_unescapes_html_entities() -> None:
+    """HTML-сущности из площадки не должны доходить до карточки и письма.
+
+    kwork отдаёт «&mdash;» прямо в тексте: в письме это читалось как
+    «Бюджет проекта клиента &mdash; от 50 000 ₽».
+    """
+    job = normalise(
+        _raw(
+            title="Разработка сайта &laquo;под ключ&raquo;",
+            description="Бюджет проекта &mdash; от 50 000 &nbsp;₽",
+        ),
+        fx=FX,
+    )
+    assert "&mdash;" not in job.description
+    assert "&nbsp;" not in job.description
+    assert "—" in job.description
+    assert "«под ключ»" in job.title

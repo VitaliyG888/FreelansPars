@@ -3,16 +3,20 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Literal
 
 from ..config import AppConfig, Secrets
+from ..domains import detect_domain
 from ..models import GeneratedMessage, Job, JobAnalysis
 from ..profile import FreelancerProfile, expand_skill, skill_domains
-from ..text import contains_term, matching_terms
+from ..text import contains_term
 from .client import LLMClient, LLMError
 from .guard import check
 from .prompts import analysis_prompt, build_system_prompt, repair_prompt
+
+log = logging.getLogger(__name__)
 
 
 def _as_list(value: object, limit: int = 5) -> list[str]:
@@ -61,7 +65,12 @@ class MessageGenerator:
             payload = await self.client.complete_json(
                 self._system_prompt, analysis_prompt(job, self.profile, matched, domain)
             )
-        except (LLMError, Exception):  # noqa: BLE001 - never fail the cycle on LLM
+        except Exception as e:  # noqa: BLE001 - never fail the cycle on LLM
+            # Молчаливый переход на запасной текст скрывал, что модель не
+            # отвечает вовсе: в базе все письма были «fallback», и причину
+            # приходилось искать по логам. Теперь отказ видно сразу, а текст
+            # письма всё равно готовится детерминированно.
+            log.warning("LLM analysis failed for %s: %s", job.uid, e)
             return self._heuristic_analysis(job), None
 
         analysis = JobAnalysis(
@@ -258,127 +267,12 @@ class MessageGenerator:
     def _domain_and_approach(job: Job) -> tuple[str | None, str]:
         """Возвращает (область, подход) для заказа.
 
-                Область определяет, какие навыки профиля попадут в письмо;
-                подход — конкретное предложение о том, как будет выполняться работа.
+                Само определение живёт в `domains`: им же пользуется проверка
+                качества, чтобы поймать письмо не о той работе. Раньше логика
+                была здесь и смотрела на склеенный текст, из-за чего заказ
+                «сайт или автоматизация» уходил в область бота.
         """
-        haystack = job.searchable_text
-
-        # Коротким русским основам нужны явные варианты словоформ: одного «бот»
-        # не совпадёт с «бота» из-за правила границ слова.
-        bot_terms = ("бот", "бота", "ботов", "боту", "боты", "ботами", "чат-бот", "чат бот")
-        bot_hit = any(contains_term(haystack, term) for term in bot_terms)
-        telegram_hit = any(contains_term(haystack, term) for term in ("телеграм", "telegram"))
-
-        if bot_hit or telegram_hit:
-            return (
-                "telegram",
-                "Могу сделать Telegram-бота: команды, хранение состояния, "
-                "обработка ошибок и запуск на вашем сервере",
-            )
-
-        options: list[tuple[str, tuple[str, ...], str]] = [
-            (
-                "parsing",
-                ("парсинг", "парсер", "скрапинг", "собрать данные", "выгрузк", "спарсить"),
-                "Могу собрать сборщик данных: настрою источники, пагинацию, "
-                "обработку ошибок и выгрузку в CSV или базу",
-            ),
-            (
-                "web",
-                (
-                    "вёрстка",
-                    "верстка",
-                    "лендинг",
-                    "макет",
-                    "figma",
-                    "фронтенд",
-                    "frontend",
-                    "html",
-                    "css",
-                    "дизайн сайта",
-                    "страниц",
-                    "react",
-                    "vue",
-                    "javascript",
-                ),
-                "Могу сделать фронтенд: адаптивную вёрстку, аккуратные компоненты "
-                "и проверку в основных браузерах",
-            ),
-            (
-                "ai",
-                ("llm", "gpt", "nlp", "нейросет"),
-                "Могу собрать LLM-сценарий: подготовка данных, промпты, "
-                "ограничения по ответам и проверка качества",
-            ),
-            (
-                "data",
-                ("postgresql", "sql", "база данных", "базы данных", "etl"),
-                "Могу взять на себя данные: схему, запросы, индексы и выгрузки без ручных правок",
-            ),
-            (
-                "backend",
-                (
-                    "django",
-                    "fastapi",
-                    "flask",
-                    "python",
-                    "php",
-                    "golang",
-                    "node",
-                    "rest api",
-                    "graphql",
-                    "бэкенд",
-                    "backend",
-                    "бэк",
-                ),
-                "Могу сделать серверную часть: модель данных, API, "
-                "тесты и понятная структура для поддержки",
-            ),
-            (
-                "devops",
-                ("docker", "развертыван", "деплой", "nginx", "linux"),
-                "Могу упаковать решение в Docker и настроить запуск, чтобы "
-                "развёртывание не зависело от окружения",
-            ),
-            (
-                "automation",
-                ("автоматизация",),
-                "Могу автоматизировать процесс: разберу шаги, уберу ручную рутину "
-                "и добавлю логирование, чтобы сбои было видно сразу",
-            ),
-            (
-                "automation",
-                ("интеграция", "интегрировать", "webhook", "вебхук"),
-                "Могу заняться интеграцией: согласуем контракт API, "
-                "добавлю обработку таймаутов, повторов и ошибок",
-            ),
-            (
-                "automation",
-                ("рассылк", "сервис"),
-                "Могу сделать сервис: API, обработку событий, повторные отправки, "
-                "логирование и мониторинг",
-            ),
-        ]
-        for domain, terms, approach in options:
-            if matching_terms(haystack, list(terms)):
-                return domain, approach
-
-        category = (job.category or "").lower()
-        if "дизайн" in category:
-            return (
-                "design",
-                "Могу предложить два варианта решения и доработать выбранный по вашим правкам",
-            )
-        if "текст" in category or "перевод" in category:
-            return (
-                "text",
-                "Могу взяться за текст: уточню тон, объём и требования, "
-                "затем покажу первый фрагмент",
-            )
-        return (
-            None,
-            "Могу разобраться в задаче, предложить план работ и оценку по срокам",
-        )
+        return detect_domain(job)
 
     @classmethod
     def _approach_for(cls, job: Job) -> str:
@@ -410,7 +304,12 @@ class MessageGenerator:
         if detail and detail.casefold() != title.casefold():
             intro += f" {detail.rstrip('.')}."
 
+        # Заказчик должен понять из первой фразы, что речь именно о его
+        # заказе, а не о рассылке. Раньше письмо начиналось с общего
+        # «Увидел задачу», и в заказе на сайт дальше шёл текст про ботов.
         approach = self._approach_for(job)
+        if approach:
+            approach = f"Готов взяться именно за это: {approach[0].lower()}{approach[1:]}"
 
         # Упоминаем навыки из профиля, которые действительно подходят к заказу.
         matched = self._matched_skills(job)

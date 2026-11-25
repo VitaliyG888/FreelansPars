@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime, timedelta, timezone
+from html import unescape
 
 from .models import BudgetKind, ClientInfo, Job, RawJob
 from .order_links import resolve_order_url
@@ -191,8 +192,11 @@ def normalise(raw: RawJob, *, fx: dict[str, float], now: datetime | None = None)
         url=raw.url,
         order_url=raw.order_url
         or resolve_order_url(raw.platform, raw.external_id, raw.url),
-        title=raw.title,
-        description=raw.description,
+        # Текст с площадок приходит с HTML-сущностями (&mdash;, &nbsp;,
+        # &quot;). Они попадали и в карточку, и в письмо, где читались как
+        # мусор: «Бюджет проекта клиента &mdash; от 50 000 ₽».
+        title=unescape(raw.title),
+        description=unescape(raw.description),
         budget_amount=amount,
         budget_min=raw.budget_min,
         budget_max=raw.budget_max,

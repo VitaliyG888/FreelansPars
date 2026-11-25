@@ -500,3 +500,173 @@ def test_backend_job_prefers_backend_skills() -> None:
     matched = gen._matched_skills(job)
     assert "Django" in matched
     assert "React" not in matched
+
+
+# --------------------------------------------------- письмо о той же работе
+def test_site_job_is_not_mistaken_for_bot() -> None:
+    """Заказ на сайт, где в описании упомянут бот, остаётся веб-заказом.
+
+    «Найти клиента на разработку сайта или автоматизации» упоминает бота в
+    теле объявления. Раньше побеждало первое совпадение по склеенному
+    тексту, и письмо предлагало сделать Telegram-бота вместо сайта.
+    """
+    gen = _generator(_web_profile())
+    job = Job(
+        platform="kwork_ru",
+        external_id="10",
+        url="https://kwork.ru/projects/10",
+        title="Найти клиента на разработку сайта или автоматизации",
+        description="Ищу партнёра, который найдёт клиента на разработку сайта, "
+        "интернет-магазина, приложения, бота либо автоматизации.",
+        budget_amount=50000,
+        budget_rub_estimate=50000,
+        currency="RUB",
+    )
+    domain, _ = gen._domain_and_approach(job)
+    assert domain == "web"
+
+    text = gen._fallback_message(job, gen._heuristic_analysis(job))
+    # Цитата описания может содержать слово «бота» — важно, что предлагается
+    # не бот, а сайт.
+    assert "сделаю бота" not in text.lower()
+    assert "сделаю telegram" not in text.lower()
+    assert "структура страниц" in text.lower()
+
+
+def test_bot_job_stays_bot_when_site_mentioned() -> None:
+    """Обратный случай: заказ на ботов не уезжает в веб из-за слова «сайт»."""
+    gen = _generator(_web_profile())
+    job = Job(
+        platform="kwork_ru",
+        external_id="11",
+        url="https://kwork.ru/projects/11",
+        title="Разработка чат-ботов в Telegram и MAX",
+        description="Настроить чат-ботов для отправки материалов после "
+        "заполнения формы на сайте.",
+        budget_amount=20000,
+        budget_rub_estimate=20000,
+        currency="RUB",
+    )
+    domain, _ = gen._domain_and_approach(job)
+    assert domain == "telegram"
+
+
+def test_fallback_message_states_readiness_to_take_job() -> None:
+    """Письмо прямо говорит о готовности взяться, а не рассуждает о теме."""
+    gen = _generator(_web_profile())
+    job = Job(
+        platform="kwork_ru",
+        external_id="12",
+        url="https://kwork.ru/projects/12",
+        title="Разработка сайта автономного без конструктора",
+        description="Нужно разработать коммерческий многоязычный сайт компании с нуля.",
+        budget_amount=80000,
+        budget_rub_estimate=80000,
+        currency="RUB",
+    )
+    text = gen._fallback_message(job, gen._heuristic_analysis(job))
+    assert "готов взяться" in text.lower()
+    assert "сайт" in text.lower()
+
+
+def test_guard_rejects_letter_about_wrong_work() -> None:
+    """Проверка ловит письмо про бота в заказе на сайт."""
+    site = Job(
+        platform="kwork_ru",
+        external_id="13",
+        url="https://kwork.ru/projects/13",
+        title="Разработка сайта для компании",
+        description="Нужен коммерческий сайт компании с нуля, без конструктора.",
+        budget_amount=80000,
+        budget_rub_estimate=80000,
+        currency="RUB",
+    )
+    violations = check(
+        "Готов взяться именно за это: сделаю Telegram-бота, команды и хранение "
+        "состояния, обработка ошибок и запуск на вашем сервере.",
+        site,
+        MessageLimit(),
+        StyleConfig(),
+    )
+    assert any("не о том" in v for v in violations)
+
+
+def test_guard_allows_site_letter_with_bot_mention() -> None:
+    """Сайт с ботом — не ошибка: заказчик сам просит оба."""
+    site = Job(
+        platform="kwork_ru",
+        external_id="14",
+        url="https://kwork.ru/projects/14",
+        title="Разработка сайта с Telegram-ботом",
+        description="Нужен сайт компании и бот для приёма заявок.",
+        budget_amount=90000,
+        budget_rub_estimate=90000,
+        currency="RUB",
+    )
+    violations = check(
+        "Готов взяться: сделаю сайт со структурой страниц и адаптивной "
+        "вёрсткой, а заявки будут приходить в Telegram-бота.",
+        site,
+        MessageLimit(),
+        StyleConfig(),
+    )
+    assert not any("не о том" in v for v in violations)
+
+
+def test_text_job_for_site_is_text_not_web() -> None:
+    """«Тексты для сайта» — работа про тексты, хотя в заголовке есть «сайт».
+
+    Без веса начала заголовка побеждало слово «сайт», и копирайтеру
+    предлагали вёрстку.
+    """
+    gen = _generator(_web_profile())
+    for title in (
+        "Написание текстов для страниц услуг медицинского сайта",
+        "Тексты для сайта кадрового агентства",
+    ):
+        job = Job(
+            platform="kwork_ru",
+            external_id="15",
+            url="https://kwork.ru/projects/15",
+            title=title,
+            description="Готовим корпоративный сайт, нужны тексты для страниц.",
+            budget_amount=15000,
+            budget_rub_estimate=15000,
+            currency="RUB",
+        )
+        domain, _ = gen._domain_and_approach(job)
+        assert domain == "text", title
+
+
+def test_site_job_with_texts_stays_web() -> None:
+    """Обратный порядок слов: «Разработка сайта с текстами» — это сайт."""
+    gen = _generator(_web_profile())
+    job = Job(
+        platform="kwork_ru",
+        external_id="16",
+        url="https://kwork.ru/projects/16",
+        title="Разработка сайта с текстами",
+        description="Нужно сделать сайт и наполнить его текстами.",
+        budget_amount=60000,
+        budget_rub_estimate=60000,
+        currency="RUB",
+    )
+    domain, _ = gen._domain_and_approach(job)
+    assert domain == "web"
+
+
+def test_design_job_is_design_not_web() -> None:
+    """Дизайн сайта — дизайн, а не вёрстка: предлагаем макет, а не код."""
+    gen = _generator(_web_profile())
+    job = Job(
+        platform="kwork_ru",
+        external_id="17",
+        url="https://kwork.ru/projects/17",
+        title="Дизайн сайта кадрового агентства с анимацией и 3D",
+        description="Нужен дизайн корпоративного сайта, есть структура.",
+        budget_amount=40000,
+        budget_rub_estimate=40000,
+        currency="RUB",
+    )
+    domain, _ = gen._domain_and_approach(job)
+    assert domain == "design"

@@ -307,7 +307,7 @@ red_flags:
 llm:
   enabled: true
   temperature: 0.4
-  max_output_tokens: 900
+  max_output_tokens: 2500
   timeout_seconds: 60
   # Если LLM недоступна, используется детерминированный русский fallback.
   fallback_enabled: true
