@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 
 from curl_cffi.requests import AsyncSession
@@ -22,6 +23,16 @@ log = logging.getLogger(__name__)
 
 class LLMError(RuntimeError):
     pass
+
+
+class LLMQuotaExhausted(LLMError):
+    """Дневная квота провайдера исчерпана (HTTP 429).
+
+    Отличается от прочих ошибок тем, что повторять запросы бессмысленно до
+    сброса квоты: каждый следующий вызов — гарантированный отказ. Без этого
+    признака бот каждые полчаса заново пробовал полсотни заказов, и все они
+    падали в fallback, сжигая цикл впустую.
+    """
 
 
 @dataclass(frozen=True)
@@ -73,10 +84,21 @@ class LLMClient:
         self.base_url = self.provider.base_url
         self.model = self.provider.model
         self._api_key = self.provider.api_key
+        #: До какого момента (monotonic) не пытаться звать модель из-за
+        #: исчерпанной квоты. Сбрасывается вручную или по истечении паузы.
+        self._quota_until: float = 0.0
 
     @property
     def available(self) -> bool:
         return self.cfg.enabled and self.provider.configured
+
+    def quota_exhausted(self) -> bool:
+        """True, если недавно получили 429 и ждать ещё имеет смысл."""
+        return time.monotonic() < getattr(self, "_quota_until", 0.0)
+
+    def mark_quota_exhausted(self, pause_seconds: float) -> None:
+        """Запоминает паузу после 429, чтобы не звать модель каждым заказом."""
+        self._quota_until = time.monotonic() + max(0.0, pause_seconds)
 
     async def complete(
         self,
@@ -89,6 +111,10 @@ class LLMClient:
     ) -> str:
         if not self.available:
             raise LLMError("LLM is not configured (missing API key or disabled)")
+        if self.quota_exhausted():
+            raise LLMQuotaExhausted(
+                "LLM quota exhausted recently; skipping until it resets"
+            )
         budget = max_tokens or self.cfg.max_output_tokens
         payload: dict[str, object] = {
             "model": self.model,
@@ -139,6 +165,11 @@ class LLMClient:
             )
             if resp.status_code >= 400:
                 body = (resp.text or "")[:300]
+                # 429 — не сбой запроса, а исчерпанная квота: отличаем, чтобы
+                # вызывающий код не пытался повторять до сброса лимита.
+                if resp.status_code == 429:
+                    self.mark_quota_exhausted(self.cfg.quota_pause_seconds)
+                    raise LLMQuotaExhausted(f"LLM HTTP 429: {body}")
                 raise LLMError(f"LLM HTTP {resp.status_code}: {body}")
             data = resp.json()
 

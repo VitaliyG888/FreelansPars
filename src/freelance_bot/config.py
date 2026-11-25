@@ -224,6 +224,11 @@ class LLMConfig(BaseModel):
     max_output_tokens: int = 900
     timeout_seconds: int = 60
     fallback_enabled: bool = True
+    #: Сколько секунд не трогать модель после ответа 429 (квота исчерпана).
+    #: Без паузы бот каждые полчаса заново пробовал полсотни заказов, и все
+    #: они падали в fallback: письма выходили шаблонными, а провайдер получал
+    #: лавину заведомо отклоняемых запросов.
+    quota_pause_seconds: int = 1800
     # Пустая строка означает встроенный SYSTEM_PROMPT. Непустое значение
     # полностью заменяет его; extra_instructions добавляются в конец.
     system_prompt: str = ""

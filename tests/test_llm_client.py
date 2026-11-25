@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from freelance_bot.llm.client import LLMClient, LLMError, ResolvedProvider, unwrap_text
+from freelance_bot.llm.client import (
+    LLMClient,
+    LLMError,
+    LLMQuotaExhausted,
+    ResolvedProvider,
+    unwrap_text,
+)
 
 
 class _StubClient(LLMClient):
@@ -72,3 +78,46 @@ def test_unwrap_text_keeps_plain_text_and_unknown_json() -> None:
     assert unwrap_text("Обычный текст письма.") == "Обычный текст письма."
     # Неизвестная структура — не выдумываем и оставляем как есть.
     assert unwrap_text('{"foo": "bar"}').startswith("{")
+
+
+class _QuotaClient(_StubClient):
+    """Клиент, у которого провайдер отвечает 429."""
+
+    async def _post(self, payload):
+        self.payloads.append(dict(payload))
+        # Настоящий `_post` ставит паузу перед выбросом исключения.
+        self.mark_quota_exhausted(self.cfg.quota_pause_seconds)
+        raise LLMQuotaExhausted("LLM HTTP 429: free-models-per-day")
+
+
+@pytest.mark.asyncio
+async def test_429_marks_pause_and_blocks_following_calls() -> None:
+    """После 429 клиент не зовёт модель повторно до сброса квоты.
+
+    Без этого каждый заказ в цикле делал новый запрос, все падали, и на
+    лимите 50 запросов в день провайдер получал сотни отказов.
+    """
+    client = _QuotaClient([])
+    client.cfg.quota_pause_seconds = 1800
+
+    with pytest.raises(LLMQuotaExhausted):
+        await client.complete("sys", "user")
+
+    assert client.quota_exhausted() is True
+
+    # Следующий вызов даже не доходит до сети.
+    with pytest.raises(LLMQuotaExhausted):
+        await client.complete("sys", "user")
+    assert len(client.payloads) == 1
+
+
+@pytest.mark.asyncio
+async def test_quota_pause_expires() -> None:
+    """Пауза не вечная: после её истечения запрос снова разрешён."""
+    client = _StubClient([("Письмо.", "stop")])
+    client.cfg.quota_pause_seconds = 1800
+
+    # Пауза уже истекла — вызов проходит.
+    client.mark_quota_exhausted(0)
+    assert client.quota_exhausted() is False
+    assert await client.complete("sys", "user") == "Письмо."

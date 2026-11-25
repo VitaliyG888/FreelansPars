@@ -12,7 +12,7 @@ from ..domains import detect_domain
 from ..models import GeneratedMessage, Job, JobAnalysis
 from ..profile import FreelancerProfile, expand_skill, skill_domains
 from ..text import contains_term
-from .client import LLMClient, LLMError
+from .client import LLMClient, LLMError, LLMQuotaExhausted
 from .guard import check
 from .prompts import analysis_prompt, build_system_prompt, repair_prompt
 
@@ -59,12 +59,26 @@ class MessageGenerator:
         """Возвращает (анализ, сырое первое сообщение). При неудаче — эвристики."""
         if not self.client.available:
             return self._heuristic_analysis(job), None
+        if self.client.quota_exhausted():
+            # Квота провайдера исчерпана: каждый вызов вернёт 429. Заказ всё
+            # равно должен дойти до чата, поэтому идём запасным путём — он
+            # теперь пишет про ту же работу, что и заказ. Модель не трогаем,
+            # чтобы не тратить цикл на заведомо отклоняемые запросы.
+            log.warning(
+                "LLM quota exhausted, using fallback for %s (letters stay "
+                "on-topic but without model wording)",
+                job.uid,
+            )
+            return self._heuristic_analysis(job), None
         domain, _approach = self._domain_and_approach(job)
         matched = self._matched_skills(job)
         try:
             payload = await self.client.complete_json(
                 self._system_prompt, analysis_prompt(job, self.profile, matched, domain)
             )
+        except LLMQuotaExhausted as e:
+            log.warning("LLM quota exhausted for %s: %s", job.uid, e)
+            return self._heuristic_analysis(job), None
         except Exception as e:  # noqa: BLE001 - never fail the cycle on LLM
             # Молчаливый переход на запасной текст скрывал, что модель не
             # отвечает вовсе: в базе все письма были «fallback», и причину
