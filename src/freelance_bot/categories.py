@@ -229,6 +229,8 @@ EXTRA_KEYWORDS: dict[str, tuple[str, ...]] = {
         "excel",
         "сайт",
         "веб-сайт",
+        "интернет-магазин",
+        "веб-приложение",
         "лендинг",
         "верстка",
         "фронтенд",
@@ -428,6 +430,34 @@ EXTRA_KEYWORDS: dict[str, tuple[str, ...]] = {
 # Названия листьев слишком общие, чтобы быть ключевыми словами классификации.
 GENERIC_TERMS: frozenset[str] = frozenset({"другие", "74 языка"})
 
+#: Составные фразы, которые ломают подсчёт слов по отдельности.
+#:
+#: «Сайт-визитка» — это сайт, но слово «визитка» внутри фразы совпадает с
+#: листом «Визитки» (печатная полиграфия) и перетягивает заказ в дизайн.
+#: Поэтому такие фразы распознаются целиком и сразу задают рубрику, минуя
+#: поэтапный подсчёт. Ключ — как фраза выглядит в тексте, значение —
+#: (рубрика, группа, подкатегория).
+PHRASE_ALIASES: tuple[tuple[tuple[str, ...], str, str, str], ...] = (
+    (
+        ("сайт-визитка", "сайт визитка", "сайт-визитку", "сайт визитку"),
+        "programming",
+        "Создание сайтов",
+        "Новый сайт",
+    ),
+    (
+        ("сайт-лендинг", "сайт лендинг"),
+        "programming",
+        "Создание сайтов",
+        "Новый сайт",
+    ),
+    (
+        ("интернет-магазин", "интернет магазин"),
+        "programming",
+        "Создание сайтов",
+        "Новый сайт",
+    ),
+)
+
 #: Группы «сайтовой» работы в рубрике «Разработка и IT». Заказчик не различает
 #: верстку, создание сайта и его доработку: для него это одна работа. Поэтому
 #: выбор любой категории из этой семьи включает всю семью — иначе «выбрана
@@ -480,6 +510,21 @@ def classify_job(job: Job) -> Classification:
         группа и подкатегория — лучшие совпадения внутри этой категории.
     """
     fields = _fields(job)
+
+    # Составные фразы проверяются раньше подсчёта: «сайт-визитка» — это сайт,
+    # хотя слово «визитка» внутри фразы относится к печатной полиграфии.
+    for phrase_names, phrase_key, phrase_group, phrase_sub in PHRASE_ALIASES:
+        if any(contains_term(fields["title"], item) for item in phrase_names):
+            phrase_category = CATEGORY_BY_KEY[phrase_key]
+            return Classification(
+                category_key=phrase_category.key,
+                category_name=phrase_category.name,
+                group=phrase_group,
+                subcategory=phrase_sub,
+                confidence=1.0,
+                matched=phrase_names[0],
+            )
+
     best: tuple[float, float, int, Category, str | None, str | None, str | None] | None = None
 
     for index, category in enumerate(CATEGORIES):

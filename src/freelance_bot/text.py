@@ -129,7 +129,11 @@ def _term_pattern(needle: str) -> re.Pattern[str]:
     внутри другого слова по-прежнему запрещено.
     """
     parts: list[str] = []
-    for word in _normalise(needle).split():
+    # Дефис разделяет слова так же, как пробел: «сайт-визитка», «сайт визитка»
+    # и «сайта-визитки» — одна и та же фраза. Без этого дефисное слово
+    # считалось единым токеном и не совпадало ни с одной словоформой.
+    tokens = [token for token in re.split(r"[\s\-]+", _normalise(needle)) if token]
+    for word in tokens:
         if re.search(r"[а-я]", word):
             stem = _stem(word)
             tail = _TAIL_SHORT if len(stem) < _SHORT_STEM else _TAIL_LONG
@@ -137,7 +141,7 @@ def _term_pattern(needle: str) -> re.Pattern[str]:
         else:
             # Латиница и цифры: точное совпадение плюс простое множественное.
             parts.append(re.escape(word) + r"s?")
-    body = r"\s+".join(parts)
+    body = r"[\s\-]+".join(parts)
     return re.compile(rf"(?<![{_WORD_CHARS}]){body}(?![{_WORD_CHARS}])")
 
 

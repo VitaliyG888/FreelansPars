@@ -288,6 +288,57 @@ def test_contains_term_keeps_word_boundaries(text: str, term: str) -> None:
     assert not contains_term(text, term)
 
 
+@pytest.mark.parametrize(
+    ("text", "term"),
+    [
+        ("Сайт-визитка", "сайт-визитка"),
+        ("Сайт визитка", "сайт-визитка"),
+        ("Создание сайта-визитки", "сайт-визитка"),
+        ("Разработка сайта-визитки", "сайт-визитка"),
+        ("Собрать сайт-визитку", "сайт-визитка"),
+        ("чат бот", "чат-бот"),
+        ("чат-бот", "чат бот"),
+    ],
+)
+def test_contains_term_treats_hyphen_as_separator(text: str, term: str) -> None:
+    """Дефис разделяет слова: «сайт-визитки» = «сайт визитка»."""
+    assert contains_term(text, term)
+
+
+def test_classify_site_business_card_is_programming() -> None:
+    """«Сайт-визитка» — создание сайта, а не печатная полиграфия.
+
+    Слово «визитка» внутри фразы совпадало с листом «Визитки» из дизайна,
+    и заказ уходил в полиграфию, хотя пользователь ждёт веб-работу.
+    """
+    for title in (
+        "Сайт-визитка",
+        "Сайт визитка",
+        "Создание сайта-визитки продуктового бренда",
+        "Разработка сайта-визитки на русском и узбекском",
+        "Собрать сайт-визитку на конструкторе «Витрина»",
+    ):
+        result = classify_job(make_job(title))
+        assert result.category_key == "programming", title
+        assert result.subcategory == "Новый сайт", title
+
+
+def test_classify_printed_business_card_stays_design() -> None:
+    """Печатные визитки остаются в дизайне: правило не расширяется на них."""
+    for title in ("Визитка для флориста", "Дизайн визитки"):
+        assert classify_job(make_job(title)).category_key == "design", title
+
+
+def test_classify_online_store_is_programming() -> None:
+    """«Интернет-магазин» — создание сайта, даже если рядом упомянут бот."""
+    for title in (
+        "Создать интернет-магазин",
+        "Разработка интернет-магазина с Telegram-ботом",
+    ):
+        result = classify_job(make_job(title))
+        assert result.category_key == "programming", title
+
+
 def test_classify_site_creation_job() -> None:
     """«Создание сайта» — программирование, а не пустая рубрика.
 
