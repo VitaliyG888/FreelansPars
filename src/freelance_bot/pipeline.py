@@ -229,7 +229,16 @@ async def run_cycle(
         subscriber_choices = [prefs for prefs in recipients.values() if prefs.categories]
 
         def selected_by_subscriber(job: Job, classification: Classification) -> bool:
-            """Заказ явно выбран хотя бы одним подписчиком."""
+            """Заказ явно выбран хотя бы одним подписчиком.
+
+            Порог уверенности общий для всех: выбор подписчика расширяет
+            сбор рубриками, но не отменяет минимальную уверенность. Иначе
+            заказ со слабым совпадением («Настройка VPS» → «сервер», балл
+            0.23) проходил только потому, что рубрика выбрана, и подписчик
+            получал мусор вперемешку с заказами.
+            """
+            if classification.confidence < cat_filter.min_confidence:
+                return False
             return any(
                 prefs.allows_platform(job.platform)
                 and prefs.allows_price(job.budget_rub_estimate)

@@ -321,6 +321,39 @@ def test_reclassify_drops_job_nobody_wants(store: JobStore) -> None:
     assert row["eligible"] == 0
 
 
+def test_reclassify_respects_confidence_threshold(store: JobStore) -> None:
+    """Слабое совпадение не становится подходящим из-за выбора подписчика.
+
+    «Настройка VPS» совпадала только по слову «сервер» из описания (балл
+    0.23). Выбор рубрики подписчиком отменял порог уверенности, и такой
+    заказ попадал в выдачу вместе с настоящими заказами.
+    """
+    from freelance_bot.categories import CategoryFilter
+
+    job = make_job(
+        title="Составить смету по готовому проекту",
+        description="Расчёт для проекта, нейросети не нужны",
+    )
+    store.upsert_job(job, eligible=0)
+    store.set_user_filters(555, categories=["programming"])
+    store._conn.execute(  # noqa: SLF001 - готовим запись с известным слабым совпадением
+        "UPDATE jobs SET category_key = 'programming', category_group = NULL,"
+        " subcategory = NULL WHERE uid = ?",
+        (job.uid,),
+    )
+
+    store.reclassify_jobs(
+        cat_filter=CategoryFilter(
+            enabled=True, categories=("programming",), min_confidence=0.35
+        )
+    )
+
+    row = store._conn.execute(  # noqa: SLF001 - проверка состояния базы
+        "SELECT eligible FROM jobs WHERE uid = ?", (job.uid,)
+    ).fetchone()
+    assert row["eligible"] == 0
+
+
 def test_user_jobs_counts_match_platform_counts(store: JobStore) -> None:
     """Счётчики бирж в меню совпадают с числом заказов в списке.
 

@@ -674,9 +674,11 @@ class JobStore:
                 fields.append(0)
             elif cat_filter is not None:
                 allowed = cat_filter.allows(result) and cat_filter.allows_price(job)
-                if not allowed:
-                    # Тот же приоритет, что в конвейере: выбор подписчика
-                    # важнее админского фильтра.
+                # Тот же приоритет, что в конвейере: выбор подписчика важнее
+                # админского фильтра, но порог уверенности общий — слабое
+                # совпадение не становится подходящим только потому, что
+                # рубрика выбрана.
+                if not allowed and result.confidence >= cat_filter.min_confidence:
                     allowed = any(
                         prefs.allows_platform(job.platform)
                         and prefs.allows_price(job.budget_rub_estimate)
