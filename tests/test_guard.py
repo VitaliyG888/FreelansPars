@@ -199,3 +199,34 @@ def test_lowercase_quote_from_job_is_not_flagged() -> None:
     )
     violations = check(message, job, LIMIT, STYLE)
     assert not any("маленькой буквы" in v for v in violations)
+
+
+def test_seo_job_is_not_taken_for_telegram() -> None:
+    """Отказ от Telegram в описании не делает заказ про Telegram.
+
+    Заказ на SEO заканчивался «на почту и в телеграм просьба не писать», и
+    областью заказа становился Telegram: письмо предлагало команды бота
+    вместо работ по позициям.
+    """
+    from freelance_bot.domains import detect_domain
+
+    job = make_job(
+        title="Вывести в ТОП-50 в Яндексе и Гугле",
+        description=(
+            "Вывести страницу в ТОП-50 Яндекса и Google по 50% запросов. "
+            "p.s.: на почту и в телеграм просьба не писать."
+        ),
+    )
+    domain, _ = detect_domain(job)
+    assert domain == "seo"
+
+
+def test_letter_quoting_p_s_note_is_flagged_or_cleaned() -> None:
+    """Служебная приписка заказчика не должна попадать в деталь письма."""
+    job = make_job(
+        title="Вывести в ТОП-50",
+        description="Вывести сайт в ТОП-50. p.s.: на почту просьба не писать.",
+    )
+    assert not job.description.startswith("p.s")
+    # Проверка не падает на таком заказе.
+    assert isinstance(check(GOOD, job, LIMIT, STYLE), list)

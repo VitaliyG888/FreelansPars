@@ -135,3 +135,30 @@ def test_normalise_unescapes_html_entities() -> None:
     assert "&nbsp;" not in job.description
     assert "—" in job.description
     assert "«под ключ»" in job.title
+
+
+def test_split_sentences_keeps_abbreviations_together() -> None:
+    """Точка после «см.» не рвёт предложение.
+
+    Заказ «Вывести в ТОП-50 (см. прикрепленный файл) эту страницу» делился
+    на два «предложения», и в письмо попадал обрывок «прикрепленный файл)
+    эту страницу».
+    """
+    from freelance_bot.text import split_sentences
+
+    parts = split_sentences(
+        "Вывести в ТОП-50 (см. прикрепленный файл) эту страницу. Нужны цена и сроки."
+    )
+    assert parts == [
+        "Вывести в ТОП-50 (см. прикрепленный файл) эту страницу.",
+        "Нужны цена и сроки.",
+    ]
+
+
+def test_lowercase_sentence_starts_ignores_abbreviations() -> None:
+    """«т. к.» и «см.» — не начало нового предложения со строчной буквы."""
+    from freelance_bot.text import lowercase_sentence_starts
+
+    assert lowercase_sentence_starts("Срочно. Т.к. дедлайн близко.") == []
+    assert lowercase_sentence_starts("Нормально. Всё с заглавной.") == []
+    assert lowercase_sentence_starts("Клиенты. готов взяться") == ["готов взяться"]

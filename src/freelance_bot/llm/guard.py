@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from ..config import MessageLimit, StyleConfig
 from ..domains import wrong_domain_note
 from ..models import Job
+from ..text import lowercase_sentence_starts
 
 LINK_RE = re.compile(
     r"(https?://|www\.|t\.me/|@[a-z0-9_]{4,}\.(ru|com)|\b[a-z0-9-]+\.(ru|com|net|io)\b)", re.I
@@ -261,10 +262,9 @@ def check(
 
     # Предложение, начатое с маленькой буквы после точки («… клиентов. готов
     # взяться за этот заказ»), — явный след генерации и небрежности.
-    # Исключения: сокращения вида «т. е.» и дословные куски из заказа —
+    # Исключения: сокращения («т. к.», «см.») и дословные куски из заказа —
     # заказчики сами пишут со строчной буквы, и виноват в этом не бот.
-    for match in re.finditer(r"(?<![а-яё]\.)[.!?]\s+([а-яё][^.!?]{0,40})", text):
-        tail = match.group(1)
+    for tail in lowercase_sentence_starts(text):
         if _is_job_quote(tail, job):
             continue
         violations.append("предложение начинается с маленькой буквы")

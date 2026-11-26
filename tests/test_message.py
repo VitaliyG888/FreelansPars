@@ -257,3 +257,46 @@ async def test_fallback_drops_platform_field_prefix() -> None:
     )
     _, message = await gen.generate(job)
     assert "сайт: задача" not in message.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_fallback_skips_customer_channel_notes() -> None:
+    """Приписка «просьба не писать» не становится деталью письма.
+
+    В SEO-заказе описание заканчивалось «p.s.: на почту и в телеграм просьба
+    не писать». Письмо цитировало этот отказ, что читается как совет
+    заказчику, а не как понимание работы.
+    """
+    gen = generator(llm_api_key="")
+    job = make_job(
+        title="Вывести в ТОП-50 в Яндексе и Гугле",
+        description=(
+            "Вывести страницу в ТОП-50 Яндекса и Google по 50% запросов. "
+            "p.s.: на почту и в телеграм просьба не писать."
+        ),
+    )
+    _, message = await gen.generate(job)
+    assert "просьба не писать" not in message.text.lower()
+    assert message.violations == []
+
+
+@pytest.mark.asyncio
+async def test_fallback_strips_repeated_title_from_detail() -> None:
+    """Повтор заголовка в начале фразы отрезается, а не выбрасывает фразу.
+
+    «Вывести в ТОП-50 … по 50% запросов» — заголовок плюс деталь. Без
+    отрезания заголовка фраза отбрасывалась целиком, и письмо оставалось
+    без конкретики.
+    """
+    gen = generator(llm_api_key="")
+    job = make_job(
+        title="Вывести в ТОП-50 в Яндексе и Гугле",
+        description=(
+            "Вывести в ТОП-50 в Яндексе и Гугле по 50% поисковых запросов "
+            "страницу с описанием пакетов."
+        ),
+    )
+    _, message = await gen.generate(job)
+    assert message.text.count("Вывести в ТОП-50") == 1
+    assert "50% поисковых запросов" in message.text
+    assert message.violations == []

@@ -12,7 +12,7 @@ from ..config import AppConfig, Secrets
 from ..domains import detect_domain
 from ..models import GeneratedMessage, Job, JobAnalysis
 from ..profile import FreelancerProfile, expand_skill, skill_domains
-from ..text import contains_term
+from ..text import contains_term, split_sentences
 from .client import LLMClient, LLMError, LLMQuotaExhausted
 from .guard import check
 from .prompts import analysis_prompt, build_system_prompt, repair_prompt
@@ -205,7 +205,7 @@ class MessageGenerator:
     # ---------------------------------------------------------------- запасной путь
     def _heuristic_analysis(self, job: Job) -> JobAnalysis:
         text = job.description or ""
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        sentences = split_sentences(text)
         summary = sentences[0][:220] if sentences else job.title
         requirements = [s[:160] for s in sentences[1:4]]
         risks = []
@@ -233,12 +233,10 @@ class MessageGenerator:
         не говорит о задаче.
         """
         source = analysis.need_summary_ru or job.description or job.title
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", source) if s.strip()]
+        sentences = split_sentences(source)
         if len(sentences) < 2 and job.description:
             extra = [
-                s.strip()
-                for s in re.split(r"(?<=[.!?])\s+", job.description)
-                if s.strip() and s.strip() not in sentences
+                s for s in split_sentences(job.description) if s not in sentences
             ]
             sentences.extend(extra[:2])
 
@@ -248,12 +246,34 @@ class MessageGenerator:
         # Поэтому набираем фразы, пока не получится связный кусок.
         parts: list[str] = []
         for sentence in sentences:
-            if not self._detail_is_useful(sentence, job):
+            # Сначала отрезаем повтор заголовка, потом оцениваем: фраза
+            # «Вывести в ТОП-50 … эту страницу» начинается с заголовка, но
+            # именно она и содержит деталь задачи.
+            candidate = self._strip_title_prefix(sentence, job)
+            if not self._detail_is_useful(candidate, job):
                 continue
-            parts.append(sentence)
+            parts.append(candidate)
             if len(" ".join(parts)) >= 90:
                 break
-        return self._clean_for_message(" ".join(parts), limit)
+        detail = " ".join(parts)
+        # После отрезанного заголовка фраза начинается со строчной («по 50%
+        # запросов…»), а в письме она идёт после точки — нужна заглавная.
+        if detail and detail[0].islower():
+            detail = detail[0].upper() + detail[1:]
+        return self._clean_for_message(detail, limit)
+
+    @staticmethod
+    def _strip_title_prefix(text: str, job: Job) -> str:
+        """Убирает заголовок заказа из начала фразы."""
+        title = " ".join((job.title or "").split())
+        if not title or not text:
+            return text
+        lowered_text, lowered_title = text.casefold(), title.casefold()
+        if not lowered_text.startswith(lowered_title):
+            return text
+        rest = text[len(title) :].lstrip(" .,;:—–-")
+        # Если после заголовка почти ничего нет, повтор безвреден.
+        return rest if len(rest) >= 25 else text
 
     @staticmethod
     def _detail_is_useful(sentence: str, job: Job) -> bool:
@@ -267,6 +287,17 @@ class MessageGenerator:
         lowered = text.casefold()
         # Заказчик рассказывает о себе, а не о задаче.
         if lowered.startswith(("мы ", "наша компания", "наш ", "меня зовут")):
+            return False
+        # Отказ от канала связи и служебные пометки — не деталь задачи.
+        # «p.s.: на почту и в телеграм просьба не писать» в письме читается
+        # как совет заказчику, а не как понимание работы.
+        if lowered.startswith(("p.s", "ps.", "p. s", "примечание", "важно:")):
+            return False
+        if re.search(
+            r"(?:не\s+(?:писать|пишите|звонить|звоните)|просьба\s+не|"
+            r"альтернативн\w*\s+канал)",
+            lowered,
+        ):
             return False
         # Повтор заголовка не добавляет ничего нового.
         title = job.title.casefold().strip()

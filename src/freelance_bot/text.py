@@ -162,3 +162,91 @@ def matching_terms(text: str, terms: list[str]) -> list[str]:
     """Возвращает все термины из *terms*, найденные в *text*, сохраняя порядок ввода.
     """
     return [term for term in terms if contains_term(text, term)]
+
+
+#: Сокращения, после которых точка не заканчивает предложение.
+_ABBREVIATIONS = (
+    "см",
+    "т",
+    "е",
+    "др",
+    "пр",
+    "г",
+    "гг",
+    "руб",
+    "тыс",
+    "млн",
+    "им",
+    "ул",
+    "д",
+    "кв",
+    "стр",
+    "рис",
+    "табл",
+    "напр",
+    "т.п",
+    "т.д",
+    "т.к",
+    "т.н",
+    "т.ч",
+    "т.о",
+    "p.s",
+    "ps",
+)
+
+
+def _mask_abbreviations(text: str) -> str:
+    """Заменяет точку в сокращениях маркером, чтобы деление не рвало фразу.
+
+    Составные сокращения («т. к.», «т. е.») обрабатываются первыми: иначе
+    «т. к.» распалось бы на два односимвольных обрывка.
+    """
+    masked = re.sub(
+        r"\b([а-яёa-z])\.\s*([а-яёa-z])\.\s*(?=[а-яёa-z])",
+        r"\1<DOT>\2<DOT> ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    masked = re.sub(
+        r"\b([а-яё])\.([а-яё])\.",
+        r"\1<DOT>\2<DOT>",
+        masked,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"\b(" + "|".join(re.escape(a) for a in _ABBREVIATIONS) + r")\.",
+        r"\1<DOT>",
+        masked,
+        flags=re.IGNORECASE,
+    )
+
+
+def split_sentences(text: str) -> list[str]:
+    """Делит текст на предложения, не разрывая сокращения и инициалы.
+
+    Простое деление по ``[.!?]`` ломало заказы: «…запросов (см. прикрепленный
+    файл)» превращалось в два «предложения», и в письмо попадал обрывок
+    «прикрепленный файл) эту страницу». Точка после «см», «т. е.», «руб»
+    предложение не заканчивает.
+    """
+    prepared = _mask_abbreviations(text)
+    parts = re.split(r"(?<=[.!?])\s+", prepared)
+    return [part.replace("<DOT>", ".").strip() for part in parts if part.strip()]
+
+
+def lowercase_sentence_starts(text: str) -> list[str]:
+    """Начала предложений, которые начинаются со строчной буквы.
+
+    Работает поверх :func:`split_sentences`, поэтому точка после сокращения
+    («см.», «т. е.», «руб.») не считается концом предложения.
+    """
+    sentences = split_sentences(text)
+    result: list[str] = []
+    for sentence in sentences[1:]:
+        if not re.match(r"[а-яё]", sentence):
+            continue
+        # «т.к.», «т.е.» в начале — сокращение, а не небрежность.
+        if re.match(r"^[а-яё]\.\s*[а-яё]\.", sentence):
+            continue
+        result.append(sentence)
+    return result

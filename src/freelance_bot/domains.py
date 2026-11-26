@@ -14,8 +14,10 @@ Telegram-бота.
 
 from __future__ import annotations
 
+import re
+
 from .models import Job
-from .text import matching_terms
+from .text import matching_terms, split_sentences
 
 #: Что обещаем сделать в письме для каждой области. Формулировки нейтральны:
 #: это план подхода, а не гарантия результата.
@@ -56,6 +58,10 @@ DOMAIN_APPROACH: dict[str, str] = {
     "text": (
         "уточню тон, объём и требования, затем покажу первый фрагмент"
     ),
+    "seo": (
+        "проверю запросы, конкурентов и точки роста, затем покажу план "
+        "по позициям"
+    ),
 }
 
 #: Слова-маркеры области. Порядок не важен: область выбирается по сумме
@@ -84,6 +90,11 @@ DOMAIN_TERMS: dict[str, tuple[str, ...]] = {
         "собрать данные",
         "выгрузк",
         "собрать контакты",
+        "сбор баз",
+        "собрать баз",
+        "чистка баз",
+        "база контактов",
+        "сбор контактов",
     ),
     "text": (
         "написание текст",
@@ -100,6 +111,8 @@ DOMAIN_TERMS: dict[str, tuple[str, ...]] = {
         "контент для",
         "редактур",
         "перевод",
+        "перевести",
+        "переведу",
     ),
     "design": (
         "дизайн",
@@ -169,6 +182,24 @@ DOMAIN_TERMS: dict[str, tuple[str, ...]] = {
         "вебхук",
         "рассылк",
     ),
+    "seo": (
+        "seo",
+        "продвижен",
+        "вывести в топ",
+        "топ-10",
+        "топ-50",
+        "топ-100",
+        "яндекс",
+        "google",
+        "гугл",
+        "поисков",
+        "семантик",
+        "ключевых слов",
+        "ключевые слова",
+        "поисковик",
+        "ранжирован",
+        "позиций в поиске",
+    ),
 }
 
 #: Области, которые нельзя путать: письмо про бота в заказе на сайт — ошибка,
@@ -198,7 +229,7 @@ def _score_domain(job: Job, terms: tuple[str, ...]) -> int:
     разные работы, хотя набор слов почти совпадает.
     """
     title = (job.title or "").lower()
-    description = (job.description or "").lower()
+    description = _without_negations((job.description or "").lower())
     extras = " ".join([job.category or "", *job.skills]).lower()
 
     score = 0
@@ -211,6 +242,23 @@ def _score_domain(job: Job, terms: tuple[str, ...]) -> int:
     if matching_terms(description, list(terms)):
         score += 1
     return score
+
+
+#: Обороты, которыми заказчик отказывается от канала связи. Заказ на SEO
+#: заканчивался «на почту и в телеграм просьба не писать» — и Telegram
+#: становился областью заказа, а письмо предлагало команды бота.
+_NEGATION_RE = re.compile(
+    r"(?:не\s+(?:писать|пишите|звонить|звоните|беспокоить|обращаться)|"
+    r"просьба\s+не|не\s+нужно|не\s+требуется|не\s+надо|без\s+звонков)",
+    re.IGNORECASE,
+)
+
+
+def _without_negations(description: str) -> str:
+    """Убирает из описания предложения с отказами от канала связи."""
+    sentences = split_sentences(description)
+    kept = [s for s in sentences if not _NEGATION_RE.search(s)]
+    return " ".join(kept)
 
 
 def detect_domain(job: Job) -> tuple[str | None, str]:
