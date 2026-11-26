@@ -206,6 +206,57 @@ DOMAIN_TERMS: dict[str, tuple[str, ...]] = {
 #: а «интеграция с API» внутри веб-заказа — нормальное уточнение.
 EXCLUSIVE_DOMAINS: tuple[str, ...] = ("telegram", "web", "parsing")
 
+#: Признаки области, по которым решается «письмо не о том». Здесь только слова
+#: о самой работе, без общих: «сайт» есть и в заказе на сбор данных («проверю
+#: сайты компаний»), и по нему нельзя судить, что письмо про вёрстку.
+EXCLUSIVE_TERMS: dict[str, tuple[str, ...]] = {
+    "telegram": (
+        "telegram",
+        "телеграм",
+        "чат-бот",
+        "чат бот",
+        "мини-приложение",
+        "mini app",
+    ),
+    "web": (
+        "вёрстка",
+        "верстка",
+        "верстк",
+        "лендинг",
+        "landing page",
+        "адаптив",
+        "фронтенд",
+        "frontend",
+        "html",
+        "css",
+        "javascript",
+        "react",
+        "vue",
+        "wordpress",
+        "вордпресс",
+        "tilda",
+        "тильда",
+        "многостраничник",
+        "сайт под ключ",
+        "интернет-магазин",
+        "интернет магазин",
+    ),
+    "parsing": (
+        "парсинг",
+        "парсер",
+        "скрапинг",
+        "спарсить",
+        "собрать данные",
+        "сбор данных",
+        "сбор баз",
+        "собрать баз",
+        "чистка баз",
+        "база контактов",
+        "сбор контактов",
+        "выгрузк",
+    ),
+}
+
 _GENERIC_APPROACH = "Разберусь в задаче, предложу план работ и оценку по срокам"
 
 
@@ -296,21 +347,41 @@ def mentioned_domains(text: str) -> set[str]:
     return found
 
 
+def _exclusive_domains_mentioned(text: str) -> set[str]:
+    """Только «сильные» слова о работе: по ним видно, о чём письмо.
+
+    Общие слова («сайт», «бот») сюда не входят: заказ на сбор базы упоминает
+    сайты компаний, и такое письмо — всё равно про парсинг, а не про вёрстку.
+    """
+    lowered = (text or "").lower()
+    found: set[str] = set()
+    for domain, terms in EXCLUSIVE_TERMS.items():
+        if matching_terms(lowered, list(terms)):
+            found.add(domain)
+    return found
+
+
 def wrong_domain_note(message: str, job: Job) -> str | None:
     """Возвращает причину, если письмо говорит не о той работе.
 
     Проверяются только взаимоисключающие области. Если заказ на сайт, а в
     письме обещан Telegram-бот (и про сайт ни слова) — это ошибка, которую
     нужно переписать. Упоминание обеих областей допустимо: «сайт с ботом».
+
+    Сравниваются сильные слова о работе, а не все маркеры области: заказ на
+    сбор базы банных комплексов упоминает сайты компаний, и письмо «проверю
+    сайты, соцсети и телефоны» — про парсинг, а не про вёрстку. Раньше такие
+    письма блокировались как «не о том» и уходили в шаблон.
     """
     job_domain, _ = detect_domain(job)
     if job_domain not in EXCLUSIVE_DOMAINS:
         return None
 
-    mentioned = mentioned_domains(message)
-    if job_domain in mentioned:
+    job_terms = EXCLUSIVE_TERMS[job_domain]
+    if matching_terms((message or "").lower(), list(job_terms)):
         return None
 
+    mentioned = _exclusive_domains_mentioned(message)
     for other in EXCLUSIVE_DOMAINS:
         if other in mentioned:
             return (

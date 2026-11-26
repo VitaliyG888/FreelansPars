@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any
@@ -24,7 +25,7 @@ from telegram.ext import ContextTypes
 
 from .llm.client import LLMClient, LLMError
 from .llm.guard import check
-from .llm.prompts import build_system_prompt
+from .llm.prompts import build_letter_system_prompt
 from .models import Job
 
 if TYPE_CHECKING:
@@ -138,6 +139,23 @@ class QuizSession:
     draft: str = ""
     #: True, когда ждём свободный текст вместо нажатия кнопки.
     awaiting_text: bool = False
+    #: Письмо собрано по шаблону, а не моделью: показываем это в карточке.
+    fallback: bool = False
+    #: Замечания проверки к последнему тексту: пользователь должен видеть,
+    #: почему письмо стоит перегенерировать.
+    violations: list[str] = field(default_factory=list)
+    #: Сколько раз письмо уже запрашивалось: повторный запрос идёт без
+    #: автоисправления, чтобы пользователь получил именно новый вариант.
+    attempt: int = 0
+
+
+@dataclass(frozen=True)
+class QuizDraft:
+    """Результат генерации: текст плюс честные пометки о его качестве."""
+
+    text: str
+    fallback: bool = False
+    violations: tuple[str, ...] = ()
 
 
 def _session_key(chat_id: int, job_uid: str) -> str:
@@ -228,23 +246,33 @@ def draft_text(
     *,
     regenerated: bool = False,
     fallback: bool = False,
+    violations: Sequence[str] = (),
 ) -> str:
-    """Сообщение с готовым письмом (в <pre>, чтобы копировалось тапом)."""
+    """Сообщение с готовым письмом (в <pre>, чтобы копировалось тапом).
+
+    ``violations`` показываются списком: если текст не прошёл проверку, человек
+    должен видеть, что именно поправить, и решить, просить ли другой вариант.
+    """
     if fallback:
         title = "✍️ Письмо собрано по шаблону"
         note = (
-            "LLM недоступен, поэтому текст собран из ваших ответов по шаблону. "
-            "Проверьте и поправьте под себя."
+            "Модель не ответила, поэтому текст собран из ваших ответов. "
+            "Нажмите «🔄 Перегенерировать», чтобы попросить письмо у модели ещё раз."
         )
     else:
         title = "🔄 Письмо перегенерировано" if regenerated else "✅ Письмо готово"
         note = "Что дальше: отредактировать, скопировать или перегенерировать."
-    return (
-        f"{title}\n"
-        f"<i>{html_escape(job.title[:120])}</i>\n\n"
-        f"<pre>{html_escape(draft)}</pre>\n\n"
-        f"{note}"
-    )
+    blocks = [
+        title,
+        f"<i>{html_escape(job.title[:120])}</i>",
+        "",
+        f"<pre>{html_escape(draft)}</pre>",
+    ]
+    if violations:
+        listed = "\n".join(f"• {html_escape(item)}" for item in violations)
+        blocks.append(f"\n⚠️ <b>Проверка нашла замечания</b>\n{listed}")
+    blocks.append(f"\n{note}")
+    return "\n".join(blocks)
 
 
 def build_fallback_draft(
@@ -279,7 +307,9 @@ def build_fallback_draft(
             f"С похожими задачами работал не раз{f', в том числе по {skills}' if skills else ''}."
         )
     elif focus == "speed":
-        lines.append("Могу взяться сразу и держать вас в курсе на каждом этапе.")
+        # Не «могу взяться»: прямое согласие звучит один раз, в финальной
+        # фразе, иначе письмо повторяет одну и ту же мысль дважды.
+        lines.append("Могу начать сразу и держать вас в курсе на каждом этапе.")
     else:
         lines.append(
             "Вижу задачу так: сначала уточняю детали, затем делаю основную часть "
@@ -302,7 +332,11 @@ def build_fallback_draft(
             "что вам нравится?"
         )
 
-    lines.append("Готов обсудить детали в удобном для вас формате.")
+    # Шаблон обязан сам проходить guard: иначе карточка «Письмо собрано по
+    # шаблону» всегда шла бы с замечаниями, а человек — с мыслью, что сломан
+    # бот. Поэтому здесь есть прямое «готов взяться» и нет фразы-клише
+    # «готов обсудить детали».
+    lines.append("Готов взяться за работу и обсудить детали в удобном для вас формате.")
     text = " ".join(lines)
     limit = 900
     if len(text) > limit:
@@ -343,6 +377,13 @@ def build_prompt(
         "",
         "Требования: 4–6 предложений, без markdown, без эмодзи, без ссылок, "
         "без восклицательных знаков, обращение на «вы». Верни только текст письма.",
+        "Начни с одной конкретной детали этого задания, а не с общих слов.",
+        "Прямо скажи, что готов взяться за эту работу (формулировка «готов "
+        "взяться» обязательна) — без этого отклик читается как рассуждение о теме.",
+        "Пиши о той работе, которая в заказе: если нужен сбор данных — про сбор "
+        "и проверку данных, если сайт — про сайт. Не подменяй задачу похожей.",
+        "Не копируй клише из заголовка и описания заказа («под ключ», "
+        "«качественно и в срок»): передай ту же мысль своими словами.",
     ]
     return "\n".join(parts)
 
@@ -478,9 +519,25 @@ class QuizCommandsMixin:
             await query.answer("⚠️ Заказ не найден.", show_alert=True)
             return
         session = self._quiz_session(chat_id, job_uid)
+        # Черновик уже есть (в памяти или в БД): сначала показываем его — из
+        # него же доступны «Перегенерировать» и «Редактировать». Заново
+        # проходить четыре шага ради нового варианта незачем.
+        existing = self._session_draft(session)
+        if existing:
+            await query.answer()
+            await self._quiz_show(
+                query,
+                chat_id,
+                draft_text(job, existing, fallback=session.fallback,
+                           violations=session.violations),
+                draft_keyboard(job),
+            )
+            return
         session.answers.clear()
         session.step = 0
         session.awaiting_text = False
+        session.attempt = 0
+        session.violations = []
         text, markup = self._render_quiz(session, job)
         await query.answer()
         await self._quiz_show(query, chat_id, text, markup)
@@ -581,12 +638,14 @@ class QuizCommandsMixin:
             return
         session = self._quiz_session(chat_id, job_uid)
         if not session.answers:
-            # Ответы потерялись (рестарт бота): начинаем квиз заново.
-            await query.answer("Начнём заново", show_alert=True)
-            session.step = 0
-            text, markup = self._render_quiz(session, job)
-            await self._quiz_show(query, chat_id, text, markup)
-            return
+            # Ответы жили в памяти и потерялись при рестарте, но заставлять
+            # проходить четыре шага заново из-за этого нечестно: повторный
+            # запрос — именно просьба дать другой текст. Берём нейтральные
+            # ответы по умолчанию, чтобы модель не получила пустой промпт.
+            session.answers.update(
+                {"tone": "neutral", "focus": "plan", "price": "ask", "question": "details"}
+            )
+        session.attempt += 1
         await query.answer("🔄 Генерирую заново")
         await self._quiz_finish(update, query, session, job, regenerated=True)
 
@@ -602,22 +661,27 @@ class QuizCommandsMixin:
         """Генерирует письмо по ответам квиза и показывает результат."""
         # Ответы уже собраны, поэтому запасной шаблон лучше тупика: письмо
         # будет без LLM, но кнопки правки и копирования на месте.
-        draft = await self.generate_quiz_draft(
-            job, session.answers, query=query, chat_id=session.chat_id, with_fallback=True
+        result = await self.generate_quiz_draft(
+            job,
+            session.answers,
+            query=query,
+            chat_id=session.chat_id,
+            with_fallback=True,
+            attempt=max(1, session.attempt),
         )
-        used_fallback = False
-        if not draft:
+        if result is None:
             await self._quiz_show(
                 query,
                 session.chat_id,
                 "⚠️ Не удалось собрать письмо. Пришлите текст вручную — "
-                "кнопка «✏️ Редактировать» ниже.",
+                "кнопка «✏️ Редактировать» ниже, или нажмите «🔄 Перегенерировать».",
                 draft_keyboard(job),
             )
             return
-        if self.secrets is None or not LLMClient(self.config.llm, self.secrets).available:
-            used_fallback = True
+        draft = result.text
         session.draft = draft
+        session.fallback = result.fallback
+        session.violations = list(result.violations)
         session.step = len(QUIZ_STEPS)
         session.awaiting_text = False
         if self.store is not None:
@@ -628,7 +692,13 @@ class QuizCommandsMixin:
         await self._quiz_show(
             query,
             session.chat_id,
-            draft_text(job, draft, regenerated=regenerated, fallback=used_fallback),
+            draft_text(
+                job,
+                draft,
+                regenerated=regenerated,
+                fallback=result.fallback,
+                violations=result.violations,
+            ),
             draft_keyboard(job),
         )
 
@@ -720,23 +790,27 @@ class QuizCommandsMixin:
         self, job: Job, session: QuizSession, chat_id: int
     ) -> None:
         """Генерирует письмо после ответа текстом и отправляет в чат."""
-        draft = await self.generate_quiz_draft(
-            job, session.answers, chat_id=chat_id, with_fallback=True
+        result = await self.generate_quiz_draft(
+            job,
+            session.answers,
+            chat_id=chat_id,
+            with_fallback=True,
+            attempt=max(1, session.attempt),
         )
-        if not draft:
+        if result is None:
             await self._bot_send(
                 chat_id=chat_id,
                 text=(
                     "⚠️ Не удалось собрать письмо. Пришлите текст вручную — "
-                    "кнопка «✏️ Редактировать» ниже."
+                    "кнопка «✏️ Редактировать» ниже, или нажмите «🔄 Перегенерировать»."
                 ),
                 reply_markup=draft_keyboard(job),
             )
             return
-        fallback = self.secrets is None or not LLMClient(
-            self.config.llm, self.secrets
-        ).available
+        draft = result.text
         session.draft = draft
+        session.fallback = result.fallback
+        session.violations = list(result.violations)
         session.step = len(QUIZ_STEPS)
         if self.store is not None:
             try:
@@ -745,7 +819,9 @@ class QuizCommandsMixin:
                 log.exception("cannot persist quiz draft for %s", job.uid)
         await self._bot_send(
             chat_id=chat_id,
-            text=draft_text(job, draft, fallback=fallback),
+            text=draft_text(
+                job, draft, fallback=result.fallback, violations=result.violations
+            ),
             parse_mode="HTML",
             reply_markup=draft_keyboard(job),
         )
@@ -758,53 +834,88 @@ class QuizCommandsMixin:
         query: CallbackQuery | None = None,
         chat_id: int | None = None,
         with_fallback: bool = False,
-    ) -> str | None:
+        attempt: int = 1,
+    ) -> QuizDraft | None:
         """Вызывает LLM с ответами квиза; None, если письмо собрать не удалось.
 
         ``with_fallback`` включает запасной текст по шаблону: квиз уже собрал
         ответы, и оставлять пользователя с тупиком «LLM недоступен» хуже, чем
         дать черновик, который можно поправить кнопкой «Редактировать».
+
+        Возвращается не только текст, но и пометки: собран ли он шаблоном и
+        какие замечания остались. Без них карточка «Письмо готово» врала, когда
+        модель не ответила или её текст не прошёл проверку.
+
+        ``attempt`` больше единицы означает повторный запрос по кнопке: тогда
+        ответ модели принимается даже с замечаниями (кроме пустого), а
+        пользователь видит список того, что стоит поправить.
         """
         del query, chat_id  # параметры для симметрии вызовов и будущих уведомлений
+        limit = self.config.messaging.limit_for(job.platform)
+        banned = list(self.profile.message_style.banned_phrases) if self.profile else []
+
+        def template() -> QuizDraft | None:
+            if not with_fallback:
+                return None
+            text = build_fallback_draft(job, answers, self.profile)
+            return QuizDraft(
+                text=text,
+                fallback=True,
+                violations=tuple(check(text, job, limit, self.config.llm.style, banned)),
+            )
+
         client = LLMClient(self.config.llm, self.secrets) if self.secrets else None
         if client is None or not client.available:
             log.info("quiz draft for %s: LLM не настроен", job.uid)
-            return build_fallback_draft(job, answers, self.profile) if with_fallback else None
+            return template()
+        if client.quota_exhausted():
+            # Каждый следующий вызов вернёт 429: шаблон честнее ожидания.
+            log.warning("quiz draft for %s: квота LLM исчерпана, шаблон", job.uid)
+            return template()
 
         price = job.budget_rub_estimate or job.budget_amount
         prompt = build_prompt(job, answers, price_rub=price, profile=self.profile)
-        limit = self.config.messaging.limit_for(job.platform)
         try:
             draft = await client.complete(
-                build_system_prompt(self.config.llm), prompt, temperature=0.6
+                build_letter_system_prompt(self.config.llm), prompt, temperature=0.6
             )
         except LLMError as exc:
             log.warning("quiz generation failed for %s: %s", job.uid, exc)
-            return build_fallback_draft(job, answers, self.profile) if with_fallback else None
+            return template()
 
         draft = draft.strip().strip('"').strip()
         if not draft:
-            return build_fallback_draft(job, answers, self.profile) if with_fallback else None
-        violations = check(
-            draft,
-            job,
-            limit,
-            self.config.llm.style,
-            list(self.profile.message_style.banned_phrases) if self.profile else [],
-        )
+            log.warning("quiz generation for %s returned empty text", job.uid)
+            return template()
+        violations = check(draft, job, limit, self.config.llm.style, banned)
         if violations:
             log.info("quiz draft for %s has violations: %s", job.uid, violations)
-            try:
-                draft = await client.complete(
-                    build_system_prompt(self.config.llm),
-                    build_prompt(job, answers, price_rub=price, profile=self.profile)
-                    + "\n\nУчти замечания и перепиши: " + ", ".join(violations),
-                    temperature=0.3,
-                )
-                draft = draft.strip().strip('"').strip()
-            except LLMError:
-                pass
-        return draft or None
+            # Одна автоисправка на первый запрос: пользователь ждёт письмо, а
+            # не инструкцию исправлять самому. На повторе по кнопке этого не
+            # делаем — там важен именно свежий вариант.
+            if attempt <= 1:
+                try:
+                    repaired = await client.complete(
+                        build_letter_system_prompt(self.config.llm),
+                        prompt + "\n\nУчти замечания и перепиши: " + ", ".join(violations),
+                        temperature=0.3,
+                    )
+                    repaired = repaired.strip().strip('"').strip()
+                except LLMError:
+                    repaired = ""
+                if repaired:
+                    repaired_violations = check(
+                        repaired, job, limit, self.config.llm.style, banned
+                    )
+                    if len(repaired_violations) <= len(violations):
+                        draft, violations = repaired, repaired_violations
+        # Шаблон предлагается только когда он объективно лучше: иначе годный
+        # текст модели подменялся бы сухим пересказом ответов квиза.
+        if violations and with_fallback:
+            candidate = template()
+            if candidate is not None and len(candidate.violations) < len(violations):
+                return candidate
+        return QuizDraft(text=draft, fallback=False, violations=tuple(violations))
 
     # ------------------------------------------------------------------ помощники
     def _quiz_job(self, job_uid: str) -> Job | None:

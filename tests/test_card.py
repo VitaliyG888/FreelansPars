@@ -487,14 +487,24 @@ class _FakeUpdate:
 
 
 class _FakeLLM:
-    """LLM-заглушка: возвращает предсказуемый текст и считает вызовы."""
+    """LLM-заглушка: возвращает предсказуемый текст и считает вызовы.
 
-    draft = "Здравствуйте! Посмотрел задачу, план работ готов, сроки реальные."
+    Текст выбран так, чтобы сам проходить guard: тесты проверяют квиз, а не
+    то, что заведомо слабый черновик подменяется шаблоном.
+    """
+
+    draft = (
+        "Здравствуйте. Готов взяться за этот интернет-магазин на Next.js: сделаю "
+        "адаптивную версию, корзину и личный кабинет. Какой бюджет заложен на задачу?"
+    )
     calls: list[str] = []
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         self.available = True
         self.model = "fake-model"
+
+    def quota_exhausted(self) -> bool:
+        return False
 
     async def complete(self, system: str, user: str, **kwargs: object) -> str:
         type(self).calls.append(user)
@@ -752,7 +762,7 @@ def test_fallback_draft_uses_quiz_answers() -> None:
     )
 
     assert prompt_free.startswith("Здравствуйте! Увидел задачу")
-    assert "Могу взяться сразу" in prompt_free
+    assert "Могу начать сразу" in prompt_free
     assert "какой бюджет заложен" in prompt_free
     assert "К какому сроку нужен результат?" in prompt_free
 
@@ -794,3 +804,168 @@ def test_description_preview_unescapes_html_entities() -> None:
 def test_description_html_unescapes_html_entities() -> None:
     assert "&mdash;" not in description_html("Сроки &mdash; две недели")
     assert "—" in description_html("Сроки &mdash; две недели")
+
+
+@pytest.mark.asyncio
+async def test_quiz_start_reopens_existing_draft(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Повторное «Составить письмо» показывает готовый текст, а не шаг 1.
+
+    Заказчик уже получил письмо; заставлять его заново отвечать на четыре
+    вопроса ради того же результата — лишние клики и лишний вызов модели.
+    """
+    from test_telegram import build_controller
+
+    _FakeLLM.calls = []
+    monkeypatch.setattr("freelance_bot.telegram_quiz.LLMClient", _FakeLLM)
+    controller = build_controller(secrets=object())
+    job = full_job()
+    controller.pending_approvals[job.uid] = SimpleNamespace(job=job)
+    user = ADMIN_ID
+
+    session = controller._quiz_session(user, job.uid)
+    session.draft = "Готовый текст письма"
+    session.step = len(QUIZ_STEPS)
+
+    update = _FakeUpdate(user_id=user, callback=f"aq:start:{job.uid}")
+    await controller._handle_callback(update, SimpleNamespace(args=[]))
+
+    shown = update.callback_query.edits[-1][0]
+    assert "Готовый текст письма" in shown
+    assert "Шаг 1 из 4" not in shown
+    # Модель не звали: текст уже есть.
+    assert _FakeLLM.calls == []
+
+
+@pytest.mark.asyncio
+async def test_quiz_regenerate_twice_keeps_asking_model(quiz) -> None:
+    """«Перегенерировать» можно нажимать повторно: каждый раз новый запрос."""
+    controller, job = quiz
+    user = ADMIN_ID
+    await controller._handle_callback(
+        _FakeUpdate(user_id=user, callback=f"aq:start:{job.uid}"), SimpleNamespace(args=[])
+    )
+    for index, key in enumerate(("friendly", "plan", "ask", "deadline")):
+        await controller._handle_callback(
+            _FakeUpdate(user_id=user, callback=f"aq:step:{index}:{key}:{job.uid}"),
+            SimpleNamespace(args=[]),
+        )
+
+    first = len(_FakeLLM.calls)
+    await controller._handle_callback(
+        _FakeUpdate(user_id=user, callback=f"aq:regen:{job.uid}"), SimpleNamespace(args=[])
+    )
+    second = len(_FakeLLM.calls)
+    await controller._handle_callback(
+        _FakeUpdate(user_id=user, callback=f"aq:regen:{job.uid}"), SimpleNamespace(args=[])
+    )
+
+    assert second > first
+    assert len(_FakeLLM.calls) > second
+    session = controller._quiz_sessions[f"{user}|{job.uid}"]
+    assert session.attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_quiz_shows_violations_after_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Письмо с замечаниями показывается с их списком, а не молча.
+
+    Пользователь должен понимать, что текст не прошёл проверку, и решать,
+    просить ли другой вариант.
+    """
+    from test_telegram import build_controller
+
+    class WeakLLM(_FakeLLM):
+        draft = "Задача знакома, сделаю. Уточните доступы."
+
+    monkeypatch.setattr("freelance_bot.telegram_quiz.LLMClient", WeakLLM)
+    controller = build_controller(secrets=object())
+    job = full_job()
+    controller.pending_approvals[job.uid] = SimpleNamespace(job=job)
+    user = ADMIN_ID
+
+    await controller._handle_callback(
+        _FakeUpdate(user_id=user, callback=f"aq:start:{job.uid}"), SimpleNamespace(args=[])
+    )
+    update = None
+    for index, key in enumerate(("friendly", "plan", "ask", "deadline")):
+        update = _FakeUpdate(user_id=user, callback=f"aq:step:{index}:{key}:{job.uid}")
+        await controller._handle_callback(update, SimpleNamespace(args=[]))
+
+    assert update is not None
+    text = update.callback_query.edits[-1][0]
+    assert "Проверка нашла замечания" in text or "Письмо собрано по шаблону" in text
+
+
+def test_draft_text_lists_violations() -> None:
+    text = draft_text(full_job(), "Текст письма.", violations=["нет прямого согласия"])
+
+    assert "Проверка нашла замечания" in text
+    assert "нет прямого согласия" in text
+    assert "<pre>Текст письма.</pre>" in text
+
+
+def test_draft_text_fallback_points_to_regenerate() -> None:
+    text = draft_text(full_job(), "Шаблонный текст.", fallback=True)
+
+    assert "собрано по шаблону" in text
+    assert "Перегенерировать" in text
+
+
+@pytest.mark.asyncio
+async def test_quiz_regenerate_after_restart_asks_model(quiz) -> None:
+    """После рестарта «Перегенерировать» зовёт модель, а не гонит по шагам.
+
+    Ответы квиза жили в памяти; их потеря — не повод заставлять человека
+    заново отвечать на те же вопросы. Повторный запрос должен дать письмо.
+    """
+    controller, job = quiz
+    user = ADMIN_ID
+    # Сессия без ответов — так выглядит состояние после перезапуска бота.
+    session = controller._quiz_session(user, job.uid)
+    assert session.answers == {}
+    calls_before = len(_FakeLLM.calls)
+
+    update = _FakeUpdate(user_id=user, callback=f"aq:regen:{job.uid}")
+    await controller._handle_callback(update, SimpleNamespace(args=[]))
+
+    assert len(_FakeLLM.calls) > calls_before
+    shown = update.callback_query.edits[-1][0]
+    assert "Шаг 1 из 4" not in shown
+    assert _FakeLLM.draft in shown
+
+
+def test_letter_system_prompt_asks_for_plain_text() -> None:
+    """Квиз ждёт текст письма, а не JSON.
+
+    Базовый промпт написан для анализа и требует «строго валидный JSON»;
+    с ним модель заворачивала письмо в объект. Отдельный промпт для письма
+    убирает это требование.
+    """
+    from freelance_bot.config import LLMConfig
+    from freelance_bot.llm.prompts import build_letter_system_prompt, build_system_prompt
+
+    letter_prompt = build_letter_system_prompt(LLMConfig())
+    assert "валидным JSON" not in letter_prompt
+    assert "только текст письма" in letter_prompt
+    # Промпт анализа не тронут: он по-прежнему просит JSON.
+    assert "валидным JSON" in build_system_prompt(LLMConfig())
+
+
+def test_letter_system_prompt_respects_owner_override() -> None:
+    """Свой промпт владельца заменяет и версию для письма."""
+    from freelance_bot.config import LLMConfig
+    from freelance_bot.llm.prompts import build_letter_system_prompt
+
+    cfg = LLMConfig(system_prompt="Пиши очень кратко.", extra_instructions="Без воды.")
+    prompt = build_letter_system_prompt(cfg)
+
+    assert prompt.startswith("Пиши очень кратко.")
+    assert "Без воды." in prompt
+
+
+def test_build_prompt_requires_ready_phrase() -> None:
+    """Промпт квиза требует прямого «готов взяться»: guard это проверяет."""
+    answers = {"tone": "neutral", "focus": "plan", "price": "ask", "question": "details"}
+    prompt = build_prompt(full_job(), answers, price_rub=None, profile=None)
+
+    assert "готов взяться" in prompt.lower()

@@ -683,3 +683,29 @@ def test_skill_domains_does_not_match_inside_other_words() -> None:
     assert "ai" not in skill_domains("HTML/CSS")
     assert "devops" in skill_domains("Linux администрирование")
     assert "web" in skill_domains("HTML/CSS")
+
+
+def test_guard_allows_parsing_letter_that_checks_sites() -> None:
+    """«Проверю сайты компаний» в заказе на сбор базы — не письмо про вёрстку.
+
+    Слово «сайт» слишком общее: в задании на сбор контактов модель обязана
+    упомянуть проверку сайтов и соцсетей. Раньше эта фраза делала область
+    письма «web», и годный текст блокировался как «письмо не о том».
+    """
+    from freelance_bot.domains import wrong_domain_note
+
+    job = Job(
+        platform="kwork_ru",
+        external_id="21",
+        url="https://kwork.ru/projects/21",
+        title="Сбор и чистка базы банных комплексов и СПА",
+        description="Собрать базу бань и СПА по России: название, телефон, сайт, соцсети.",
+        budget_amount=15000,
+        budget_rub_estimate=15000,
+        currency="RUB",
+    )
+    message = (
+        "Готов взяться за этот сбор: соберу тестовые 20 строк и проверю сайты, "
+        "соцсети и телефоны, затем уберу дубли и приведу данные к единому виду."
+    )
+    assert wrong_domain_note(message, job) is None

@@ -646,3 +646,47 @@ async def test_collect_adapter_without_cfg_polls_every_cycle(
     await collect(None, None)  # type: ignore[arg-type]
     await collect(None, None)  # type: ignore[arg-type]
     assert calls == ["fl_ru", "fl_ru"]
+
+
+@pytest.mark.asyncio
+async def test_cards_arrive_without_letters_when_generation_is_off(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Без generate_messages карточки приходят, а LLM не вызывается вовсе.
+
+    Постоянный цикл бота работает именно так: письмо собирается по кнопке,
+    поэтому токены не тратятся на заказы, которые человек не открывал.
+    """
+    from freelance_bot.llm.message import MessageGenerator
+
+    config = build_config("fl_ru")
+    config.runtime.dry_run = True
+    config.network.respect_robots_txt = False
+    secrets = build_secrets(tmp_path)
+    adapter = FixtureAdapter("fl_ru", load_html("fl_ru"))
+    monkeypatch.setattr("freelance_bot.pipeline.build_adapters", lambda cfg: [adapter])
+
+    calls: list[str] = []
+
+    class SpyGenerator(MessageGenerator):
+        async def generate(self, job):  # type: ignore[override]
+            calls.append(job.uid)
+            raise AssertionError("генерация в фоне запрещена")
+
+    monkeypatch.setattr("freelance_bot.pipeline.MessageGenerator", SpyGenerator)
+
+    tg = FakeTelegram()
+    report = await run_cycle(
+        config,
+        secrets,
+        with_browser=False,
+        telegram_bot=tg,
+        generate_messages=False,
+    )
+
+    assert report.jobs_eligible > 0
+    assert report.messages_generated == 0
+    assert calls == []
+    # Каждый подходящий заказ всё равно дошёл до чата — без письма.
+    assert len(tg.notified) == report.jobs_eligible
+    assert tg.with_message == []

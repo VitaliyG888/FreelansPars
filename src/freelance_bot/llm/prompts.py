@@ -43,6 +43,31 @@ def build_system_prompt(llm: LLMConfig | None = None) -> str:
     return base
 
 
+def build_letter_system_prompt(llm: LLMConfig | None = None) -> str:
+    """Системный промпт для письма как такового (без обёртки в JSON).
+
+    Встроенный ``SYSTEM_PROMPT`` заканчивается требованием «отвечай строго
+    валидным JSON»: он написан для анализа, где ответ разбирается как объект.
+    Квиз просит готовый текст письма, и с этим требованием модель честно
+    пыталась вернуть JSON — письмо приходило в кавычках и фигурных скобках.
+
+    Правка владельца (``llm.system_prompt``) уважается как есть: если человек
+    задал свой текст, он заменяет и эту версию тоже.
+    """
+    override = (llm.system_prompt if llm else "").strip()
+    if not override:
+        base = SYSTEM_PROMPT.replace(
+            "\n\nОтвечай строго валидным JSON без пояснений вокруг.",
+            "\n\nВерни только текст письма, без JSON, кавычек и пояснений.",
+        )
+    else:
+        base = override
+    extra = (llm.extra_instructions if llm else "").strip()
+    if extra:
+        base += "\n\nДОПОЛНИТЕЛЬНЫЕ ТРЕБОВАНИЯ ВЛАДЕЛЬЦА БОТА:\n" + extra
+    return base
+
+
 def _profile_block(profile: FreelancerProfile) -> str:
     """Рендерит профиль фрилансера как контекст промпта."""
     lines: list[str] = []

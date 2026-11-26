@@ -132,6 +132,11 @@ async def run_with_telegram(
                     store=store,
                     telegram_bot=telegram_bot,
                     profile=telegram_bot.profile,
+                    # Письма собираются только по кнопке «Составить письмо-ответ
+                    # с AI»: каждый автозапрос тратил токены на заказы, которые
+                    # человек даже не собирался открывать. Карточка приходит без
+                    # текста, а квиз и перегенерация работают в любой момент.
+                    generate_messages=False,
                 )
                 log.info(
                     "Cycle #%d complete: %d jobs, %d new, %d eligible, %d messages",
