@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, tzinfo
 from html import escape as html_escape
+from html import unescape as html_unescape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -172,7 +173,10 @@ def description_preview(description: str) -> tuple[str, bool]:
     не показывать половину слова в карточке. Используется для текстовых
     отчётов (например, /jobs); в карточке работает сворачиваемая цитата.
     """
-    text = " ".join((description or "").split())
+    # HTML-сущности (&mdash;, &nbsp;) приходят с площадки и в старых записях
+    # базы лежат как есть. Разворачиваем при показе, чтобы не переписывать
+    # историю ради косметики.
+    text = " ".join(html_unescape(description or "").split())
     if len(text) <= DESCRIPTION_PREVIEW_CHARS:
         return text, False
     cut = text[:DESCRIPTION_PREVIEW_CHARS]
@@ -193,7 +197,7 @@ def description_html(description: str) -> str:
     один абзац без переводов строки, и разрезать её между сообщениями значит
     порвать HTML-тег.
     """
-    text = " ".join((description or "").split())
+    text = " ".join(html_unescape(description or "").split())
     if not text:
         return ""
     if len(text) > DESCRIPTION_CARD_CHARS:

@@ -119,3 +119,28 @@ def test_specificity_is_higher_for_specific_text() -> None:
     specific = specificity(GOOD, JOB)
     generic = specificity("Готов выполнить задачу быстро и качественно.", JOB)
     assert specific > generic
+
+
+def test_cliche_from_job_title_is_not_flagged() -> None:
+    """Клише из самого заказа не считается шаблоном бота.
+
+    Заказ называется «Сайт под ключ». Письмо обязано назвать его так же,
+    иначе непонятно, о чём оно. Раньше проверка блокировала такой текст,
+    и заказ уходил в чат вообще без письма.
+    """
+    job = make_job(
+        title="Редизайн сайта под ключ",
+        description="Нужен редизайн сайта под ключ, сохранив платформу и контент.",
+    )
+    message = (
+        "Здравствуйте. Увидел задачу «Редизайн сайта под ключ». Сохраню платформу "
+        "и контент, поменяю дизайн и шаблон. Что уже есть по структуре страниц?"
+    )
+    assert check(message, job, LIMIT, STYLE) == []
+
+
+def test_cliche_absent_from_job_is_still_flagged() -> None:
+    """Обратная сторона: в чужом заказе «под ключ» остаётся шаблоном."""
+    job = make_job(title="Лендинг", description="Нужен лендинг для онлайн-курса.")
+    violations = check("Сделаю сайт под ключ, всё под ключ и быстро.", job, LIMIT, STYLE)
+    assert any("под ключ" in v for v in violations)

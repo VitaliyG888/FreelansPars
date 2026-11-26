@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import re
+from html import unescape as html_unescape
 from typing import Literal
 
 from ..config import AppConfig, Secrets
@@ -223,8 +224,13 @@ class MessageGenerator:
     def _job_detail(self, job: Job, analysis: JobAnalysis, limit: int = 260) -> str:
         """Собирает фрагмент деталей под конкретный заказ из ТЗ.
 
-                Если доступны, берутся два предложения: первое задаёт тему,
-                второе добавляет конкретные существительные, которые ищет проверка конкретики.
+        Берётся первое содержательное предложение описания, но с двумя
+        ограничениями. Во-первых, дословная цитата объявления в первом
+        сообщении читается как автоответчик: заказчик видит свой же текст.
+        Поэтому длинные куски отбрасываются, а из оставшегося убираются
+        служебные обороты площадки. Во-вторых, цитата должна быть именно про
+        работу, а не про компанию заказчика: «Мы — digital-агентство» ничего
+        не говорит о задаче.
         """
         source = analysis.need_summary_ru or job.description or job.title
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", source) if s.strip()]
@@ -235,13 +241,47 @@ class MessageGenerator:
                 if s.strip() and s.strip() not in sentences
             ]
             sentences.extend(extra[:2])
-        joined = " ".join(sentences[:2])
-        return self._clean_for_message(joined, limit)
+
+        # Одного предложения часто мало: заказчик пишет короткими фразами
+        # («Нужно анимировать сцену. Много гринпенсела. 3 секунд.»), и письмо
+        # оставалось без деталей — проверка конкретики его блокировала.
+        # Поэтому набираем фразы, пока не получится связный кусок.
+        parts: list[str] = []
+        for sentence in sentences:
+            if not self._detail_is_useful(sentence, job):
+                continue
+            parts.append(sentence)
+            if len(" ".join(parts)) >= 90:
+                break
+        return self._clean_for_message(" ".join(parts), limit)
+
+    @staticmethod
+    def _detail_is_useful(sentence: str, job: Job) -> bool:
+        """Годится ли предложение как деталь в письме."""
+        text = sentence.strip()
+        if len(text) < 15:
+            return False
+        # Слишком длинный кусок — это уже пересказ ТЗ, а не деталь.
+        if len(text) > 220:
+            return False
+        lowered = text.casefold()
+        # Заказчик рассказывает о себе, а не о задаче.
+        if lowered.startswith(("мы ", "наша компания", "наш ", "меня зовут")):
+            return False
+        # Повтор заголовка не добавляет ничего нового.
+        title = job.title.casefold().strip()
+        repeats_title = bool(
+            title and (lowered.startswith(title[:20]) or title.startswith(lowered[:20]))
+        )
+        return not repeats_title
 
     @staticmethod
     def _clean_for_message(text: str, limit: int = 140) -> str:
         from .guard import EMOJI_RE
 
+        # Текст из базы мог быть сохранён до нормализации: там остались
+        # «&mdash;», «&nbsp;» и «&laquo;». Заказчик не должен их видеть.
+        text = html_unescape(text or "")
         text = " ".join(text.split())
         text = EMOJI_RE.sub("", text)
         # Никогда не цитируем ссылки, ники, email и голые домены из ТЗ.
@@ -261,6 +301,19 @@ class MessageGenerator:
         text = re.sub(r"\.{2,}", ".", text)
         text = re.sub(r"\s+", " ", text)
         text = re.sub(r"\s+([,.;:])", r"\1", text)
+        # Площадка часто ставит в начало описания служебную подпись
+        # («Сайт: Задача: …»). В письме она читается как обрывок формы.
+        for _ in range(3):
+            stripped = re.sub(
+                r"^(?:сайт|задача|тз|описание|суть|что нужно|что требуется|нужно)"
+                r"\s*:\s*",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if stripped == text:
+                break
+            text = stripped
         text = re.sub(r"^[\s.,;:—–-]+", "", text)
         text = re.sub(r"\s*[—–]\s*", " — ", text)
         if len(text) > limit:

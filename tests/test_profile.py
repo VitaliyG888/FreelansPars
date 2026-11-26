@@ -670,3 +670,16 @@ def test_design_job_is_design_not_web() -> None:
     )
     domain, _ = gen._domain_and_approach(job)
     assert domain == "design"
+
+
+def test_skill_domains_does_not_match_inside_other_words() -> None:
+    """Короткие маркеры не должны находиться внутри чужих слов.
+
+    ``ux`` находится внутри ``linux``, ``ml`` — внутри ``html``. Из-за этого
+    навык «Linux администрирование» уезжал в дизайн, и в заказе на дизайн
+    сайта письмо хвалилось администрированием Linux.
+    """
+    assert "design" not in skill_domains("Linux администрирование")
+    assert "ai" not in skill_domains("HTML/CSS")
+    assert "devops" in skill_domains("Linux администрирование")
+    assert "web" in skill_domains("HTML/CSS")

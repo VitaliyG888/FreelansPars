@@ -10,6 +10,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field
 
+from .text import contains_term
+
 # --------------------------------------------------------------------------- #
 # Области навыков
 # --------------------------------------------------------------------------- #
@@ -186,12 +188,19 @@ def expand_skill(skill: str) -> list[str]:
 
 
 def skill_domains(skill: str) -> set[str]:
-    """Возвращает области, к которым относится навык профиля."""
+    """Возвращает области, к которым относится навык профиля.
+
+    Маркеры сопоставляются через общий `contains_term`: по границам слова и с
+    учётом русских словоформ. Раньше сравнение шло подстрокой, и короткие
+    маркеры находились внутри чужих слов: ``ux`` внутри ``linux`` (навык
+    уезжал в дизайн), ``ml`` внутри ``html`` (навык уезжал в AI). Из-за этого
+    в заказе на дизайн сайта письмо хвалилось «Linux администрированием».
+    """
     variants = expand_skill(skill)
     found: set[str] = set()
     for domain, markers in SKILL_DOMAINS.items():
         for marker in markers:
-            if any(marker in variant for variant in variants):
+            if any(contains_term(variant, marker) for variant in variants):
                 found.add(domain)
                 break
     return found

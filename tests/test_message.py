@@ -216,3 +216,44 @@ def test_analysis_prompt_names_job_domain() -> None:
     prompt = analysis_prompt(job, FreelancerProfile(), domain="web")
     assert "ОБЛАСТЬ ЭТОГО ЗАКАЗА: web" in prompt
     assert "не должен получать предложение сделать Telegram-бота" in prompt
+
+
+@pytest.mark.asyncio
+async def test_fallback_collects_short_sentences_for_specificity() -> None:
+    """Короткие фразы описания собираются вместе, а не отбрасываются.
+
+    Заказчики пишут телеграфно: «Нужно анимировать сцену. Много
+    гринпенсела. 3 секунд.» Раньше первая фраза короче 25 символов
+    отбрасывалась, письмо оставалось без деталей и не проходило проверку
+    конкретики.
+    """
+    gen = generator(llm_api_key="")
+    job = make_job(
+        title="Blender",
+        description=(
+            "Нужно анимировать сцену. Много гринпенсела. 3 секунд. "
+            "Есть иллюстрация которой надо держаться."
+        ),
+    )
+    _, message = await gen.generate(job)
+    assert message.violations == []
+    assert "гринпенсел" in message.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_fallback_drops_platform_field_prefix() -> None:
+    """Служебная подпись площадки не попадает в письмо.
+
+    Kwork иногда кладёт в начало описания «Сайт: Задача: …» — в письме это
+    читается как обрывок формы.
+    """
+    gen = generator(llm_api_key="")
+    job = make_job(
+        title="Настройка чат-бота",
+        description=(
+            "Сайт: Задача: настроить чат-бота для отправки материалов после "
+            "заполнения формы на сайте клиники."
+        ),
+    )
+    _, message = await gen.generate(job)
+    assert "сайт: задача" not in message.text.lower()

@@ -169,6 +169,14 @@ def check(
     violations: list[str] = []
     text = message.strip()
     lowered = text.lower()
+    # Слова заказчика — не признак шаблона. Если заказ называется «Сайт под
+    # ключ», письмо обязано назвать его так же, иначе непонятно, о чём оно.
+    # Раньше такой заголовок сам себя блокировал: письмо не проходило
+    # проверку и заказ уходил в чат без текста.
+    job_words = f"{job.title} {job.description}".lower()
+
+    def from_job(phrase: str) -> bool:
+        return bool(phrase) and phrase in job_words
 
     if not text:
         return ["пустое сообщение"]
@@ -180,19 +188,20 @@ def check(
         violations.append("содержит ссылку или внешний контакт")
 
     for phrase in style.banned_phrases:
-        if phrase.lower() in lowered:
+        if phrase.lower() in lowered and not from_job(phrase.lower()):
             violations.append(f"шаблонная фраза: «{phrase}»")
     for phrase in extra_banned:
-        if phrase.strip() and phrase.strip().lower() in lowered:
+        banned = phrase.strip().lower()
+        if banned and banned in lowered and not from_job(banned):
             violations.append(f"запрещённая фраза из профиля: «{phrase.strip()}»")
     for phrase in AI_TELLS:
-        if phrase in lowered:
+        if phrase in lowered and not from_job(phrase):
             violations.append(f"признак машинного текста: «{phrase}»")
     for phrase in TEMPLATE_BODY_PHRASES:
-        if phrase in lowered:
+        if phrase in lowered and not from_job(phrase):
             violations.append(f"шаблонная формулировка: «{phrase}»")
     for phrase in FILLER_PHRASES:
-        if phrase in lowered:
+        if phrase in lowered and not from_job(phrase):
             violations.append(f"вода в тексте: «{phrase}»")
 
     if EMOJI_RE.search(text) and len(EMOJI_RE.findall(text)) > style.max_emoji:

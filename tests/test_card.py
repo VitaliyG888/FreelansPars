@@ -14,6 +14,7 @@ from freelance_bot.card_render import (
     DIVIDER,
     card_keyboard,
     category_icon,
+    description_html,
     description_preview,
     format_budget,
     format_deadline,
@@ -776,3 +777,20 @@ def test_fallback_draft_respects_price_mode_skip() -> None:
 
     assert "₽" not in text
     assert "бюджет" not in text.casefold()
+
+
+def test_description_preview_unescapes_html_entities() -> None:
+    """Старые записи в базе хранят ``&mdash;`` как есть.
+
+    Разворачиваем при показе: переписывать историю ради косметики дороже,
+    а заказчик не должен видеть «Бюджет &mdash; от 50 000 ₽».
+    """
+    text, _ = description_preview("Бюджет проекта &mdash; от 50 000 &nbsp;₽")
+    assert "&mdash;" not in text
+    assert "&nbsp;" not in text
+    assert "—" in text
+
+
+def test_description_html_unescapes_html_entities() -> None:
+    assert "&mdash;" not in description_html("Сроки &mdash; две недели")
+    assert "—" in description_html("Сроки &mdash; две недели")
