@@ -407,7 +407,7 @@ class MessageGenerator:
         # «Увидел задачу», и в заказе на сайт дальше шёл текст про ботов.
         approach = self._approach_for(job)
         if approach:
-            approach = f"Готов взяться именно за это: {approach[0].lower()}{approach[1:]}"
+            approach = f"Готов взяться: {approach[0].lower()}{approach[1:]}"
 
         # Упоминаем навыки из профиля, которые действительно подходят к заказу.
         matched = self._matched_skills(job)

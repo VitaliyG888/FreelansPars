@@ -196,6 +196,22 @@ def _is_job_quote(fragment: str, job: Job) -> bool:
     return needle in haystack
 
 
+def _foreign_link(message: str, job: Job) -> bool:
+    """Есть ли в письме ссылка или контакт, которых не было в заказе.
+
+    Заказчик сам пишет адрес страницы («продвинуть giprint.ru/pakety»), и
+    модель называет его в письме — это не контакт исполнителя. Без такой
+    оговорки годное письмо блокировалось как «содержит ссылку», и заказ
+    уходил в запасной текст.
+    """
+    job_text = f"{job.title} {job.description} {job.url}".casefold()
+    for match in LINK_RE.finditer(message):
+        found = match.group(0).casefold()
+        if found not in job_text:
+            return True
+    return False
+
+
 def check(
     message: str,
     job: Job,
@@ -223,7 +239,7 @@ def check(
     if len(text) > limit.max_chars:
         violations.append(f"длина {len(text)} > лимита {limit.max_chars}")
 
-    if not limit.allow_links and LINK_RE.search(text):
+    if not limit.allow_links and _foreign_link(text, job):
         violations.append("содержит ссылку или внешний контакт")
 
     for phrase in style.banned_phrases:

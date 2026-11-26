@@ -230,3 +230,36 @@ def test_letter_quoting_p_s_note_is_flagged_or_cleaned() -> None:
     assert not job.description.startswith("p.s")
     # Проверка не падает на таком заказе.
     assert isinstance(check(GOOD, job, LIMIT, STYLE), list)
+
+
+def test_link_taken_from_job_is_allowed() -> None:
+    """Адрес страницы из заказа — не контакт исполнителя.
+
+    Заказчик просит продвинуть giprint.ru/pakety-zip-lock. Модель называет
+    этот адрес в письме, и раньше годный текст блокировался как «содержит
+    ссылку», а заказ уходил в запасной шаблон.
+    """
+    job = make_job(
+        title="Вывести в ТОП-50",
+        description="Продвинуть страницу giprint.ru/pakety-zip-lock по запросам.",
+    )
+    message = (
+        "Здравствуйте. Готов взяться за этот заказ по странице "
+        "giprint.ru/pakety-zip-lock и разобрать достижимость ТОП-50. "
+        "Какой регион учитывать при проверке позиций?"
+    )
+    assert check(message, job, LIMIT, STYLE) == []
+
+
+def test_foreign_link_is_still_flagged() -> None:
+    """Своя ссылка или почта в письме по-прежнему запрещена."""
+    job = make_job(
+        title="Вывести в ТОП-50",
+        description="Продвинуть страницу giprint.ru/pakety-zip-lock по запросам.",
+    )
+    message = (
+        "Здравствуйте. Готов взяться за этот заказ. Портфолио: https://my-site.ru/works "
+        "и почта me@example.com."
+    )
+    violations = check(message, job, LIMIT, STYLE)
+    assert any("ссылк" in v for v in violations)

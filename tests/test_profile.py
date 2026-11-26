@@ -582,7 +582,7 @@ def test_guard_rejects_letter_about_wrong_work() -> None:
         currency="RUB",
     )
     violations = check(
-        "Готов взяться именно за это: сделаю Telegram-бота, команды и хранение "
+        "Готов взяться: сделаю Telegram-бота, команды и хранение "
         "состояния, обработка ошибок и запуск на вашем сервере.",
         site,
         MessageLimit(),
