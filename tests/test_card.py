@@ -969,3 +969,32 @@ def test_build_prompt_requires_ready_phrase() -> None:
     prompt = build_prompt(full_job(), answers, price_rub=None, profile=None)
 
     assert "готов взяться" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_quiz_opens_for_card_without_draft(tmp_path) -> None:
+    """Карточка без черновика: заказ восстанавливается из БД, квиз стартует.
+
+    В постоянном цикле письмо не генерируется заранее, поэтому
+    ``pending_approvals`` пуст, и квиз обязан взять заказ из сохранённого
+    payload. Иначе кнопка «Составить письмо» отвечала бы «заказ не найден».
+    """
+    from freelance_bot.storage import JobStore
+    from test_telegram import build_controller
+
+    job = full_job()
+    store = JobStore(tmp_path / "bot.db")
+    try:
+        store.upsert_job(job, eligible=True)
+        controller = build_controller(store=store, secrets=object())
+        # pending_approvals пуст, как после доставки карточки без письма.
+        assert job.uid not in controller.pending_approvals
+        user = ADMIN_ID
+
+        update = _FakeUpdate(user_id=user, callback=f"aq:start:{job.uid}")
+        await controller._handle_callback(update, SimpleNamespace(args=[]))
+
+        shown = update.callback_query.edits[-1][0]
+        assert "Шаг 1 из 4" in shown
+    finally:
+        store.close()
