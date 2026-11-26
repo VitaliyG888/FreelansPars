@@ -133,15 +133,19 @@ class LLMClient:
         # размышления и возвращают пустой content при finish_reason=length.
         # Один повтор у них не гарантия: на длинном системном промпте и 3600
         # токенов может уйти в рассуждения целиком, поэтому пробуем лестницу.
+        # Обрезанный ответ (finish=length с непустым content) тоже бесполезен:
+        # JSON обрывается на середине, разбор падает, а письмо выходит
+        # недописанным. Раньше повтор срабатывал только на пустой ответ, и
+        # такие заказы молча уезжали в запасной текст.
         for attempt_budget in (budget * 4, 8_000, 16_000):
-            if content.strip() or finish != "length":
+            if finish != "length":
                 break
             if attempt_budget <= budget:
                 continue
             budget = attempt_budget
             payload["max_tokens"] = budget
             log.info(
-                "LLM returned empty content (finish=length), retrying with %s tokens",
+                "LLM output truncated (finish=length), retrying with %s tokens",
                 budget,
             )
             content, finish = await self._post(payload)

@@ -121,3 +121,21 @@ async def test_quota_pause_expires() -> None:
     client.mark_quota_exhausted(0)
     assert client.quota_exhausted() is False
     assert await client.complete("sys", "user") == "Письмо."
+
+
+@pytest.mark.asyncio
+async def test_truncated_json_is_retried_with_bigger_budget() -> None:
+    """Обрезанный ответ перезапрашивается, а не уезжает в запасной текст.
+
+    На реальном заказе модель вернула валидное начало JSON и оборвалась на
+    лимите: разбор падал с «no JSON object», и письмо молча подменялось
+    шаблоном. Пустой ответ ловился, обрезанный — нет.
+    """
+    truncated = '{"need_summary_ru": "Нужен партнёр", "first_message": "Привет'
+    client = _StubClient([(truncated, "length"), ('{"first_message": "Письмо."}', "stop")])
+
+    assert await client.complete("sys", "user", json_mode=True) == (
+        '{"first_message": "Письмо."}'
+    )
+    # Второй запрос ушёл с увеличенным бюджетом.
+    assert client.payloads[1]["max_tokens"] > client.payloads[0]["max_tokens"]
