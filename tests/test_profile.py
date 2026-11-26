@@ -279,9 +279,9 @@ def test_guard_flags_dash_overuse() -> None:
 def test_guard_accepts_human_message() -> None:
     msg = (
         "Здравствуйте. Задача с Telegram-ботом на Python, который тянет данные из "
-        "Google Sheets и пишет в PostgreSQL, мне знакома. Соберу команды, состояние "
-        "пользователей и обработку ошибок, чтобы при сбое видеть причину сразу. "
-        "Какой бюджет закладываете на эту работу?"
+        "Google Sheets и пишет в PostgreSQL, мне знакома — готов взяться за неё. Соберу "
+        "команды, состояние пользователей и обработку ошибок, чтобы при сбое видеть "
+        "причину сразу. Какой бюджет закладываете на эту работу?"
     )
     violations = check(msg, make_job(), MessageLimit(max_chars=3000), _style())
     assert violations == [], violations
